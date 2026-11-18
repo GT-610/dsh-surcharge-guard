@@ -1,142 +1,127 @@
-/**
- * dsh-surcharge-guard — Host half.
- *
- * Some providers bill a request at double rate once the prompt crosses a
- * threshold that sits well below the advertised context window. Shrinking the
- * window does not fix that: compaction fires at
- * `min(W * thresholdRatio, W - output - headroom)`, so a 272K window caps the
- * trigger at `272K * 0.8 = 217.6K` and can never fire near the line.
- *
- * This plugin adds the field that is actually missing — an explicit "double
- * billing starts here" number per model — and folds history through the
- * session's own compaction service before a step crosses it.
- *
- * It writes no new session event type and replaces no service. The only durable
- * writes are the `compaction/start` .. `compaction/end` pair that
- * `compactRegion` already owns. Decision logic lives in `./logic.js` so it can
- * be tested without a runtime.
- *
- * @module dsh-surcharge-guard
- */
-
+/** Host-side, best-effort surcharge protection for model requests. */
 import z from '@deepseek-ai/schemastery'
-import {
-  DEFAULTS,
-  FAMILIES,
-  PLUGIN_ID,
-  familyOf,
-  normalizeConfig,
-  ruleFor,
-  selectRange,
-} from './logic.js'
+import { DEFAULTS, normalizeConfig, ruleFor, selectRange } from './logic.js'
 
 export { DEFAULTS, FAMILIES, PLUGIN_ID, familyOf, normalizeConfig, normalizeRule, ruleFor, selectRange, balanceCuts } from './logic.js'
 
-/**
- * Resolve the compaction service that governs one agent.
- *
- * The shipped preset mounts `compaction` inside an isolated realm, so the root
- * realm has no such service; the preset registry is the supported way to reach
- * the instance that actually owns this Agent's session.
- *
- * @param ctx - plugin context.
- * @param agent - agent whose scope is consulted.
- * @returns the governing compaction service, or `undefined`.
- */
 function compactionFor(ctx, agent) {
+  // Web presets own an isolated backend; a standalone profile may own it at root.
   return ctx.get('agentPresets')?.serviceFor(agent, 'compaction') ?? ctx.get('compaction')
 }
 
-/**
- * Fold history until the next prompt is back under the guarded line.
- *
- * @param ctx - plugin context.
- * @param config - normalized configuration.
- * @param agent - agent about to take a step.
- * @param signal - step cancellation.
- * @returns a short outcome word for logging.
- */
-async function enforce(ctx, config, agent, signal) {
-  const session = agent.session
-  const header = session.requestHeader()
-  if (header === undefined) return 'no-route'
-  const rule = ruleFor(config, header.config)
-  if (rule === undefined) return 'unguarded'
-
-  const compaction = compactionFor(ctx, agent)
-  if (compaction === undefined) return 'no-compaction'
-
-  const measurement = ctx.tokenMeter.measure(session)
-  const cap = Math.max(1, rule.surchargeAtTokens - config.safetyMarginTokens)
-  if (measurement.totalTokens < cap) return 'under-cap'
-
-  const range = selectRange(session, measurement.nodes, Math.floor(cap * config.retainRatio))
-  if (range === undefined) return 'no-range'
-  if (signal.aborted) return 'aborted'
-
-  const result = await compaction.compactRegion(range.start, range.end, agent, signal)
-  ctx.logger.info(
-    `surcharge guard (${rule.provider}/${rule.model}): folded ${result.shadowedSeqs.length} nodes, `
-    + `cap ${cap}, line ${rule.surchargeAtTokens}, was ${measurement.totalTokens} estimated tokens`,
-  )
-  return 'compacted'
+/** The next request has not been built yet. Reprice the committed history for
+ * the selected route, using the previous tool envelope only as a proxy. */
+function projectedHeader(session, selection) {
+  const { provider, model, reasoningEffort } = selection
+  const previous = session.requestHeader()
+  const sameRoute = previous?.config.provider === provider && previous.config.model === model
+  const config = { ...(sameRoute ? previous.config : {}), provider, model }
+  if (reasoningEffort !== undefined) config.reasoningEffort = reasoningEffort
+  else if (sameRoute && previous.adapterDefaults?.reasoningEffort !== true) delete config.reasoningEffort
+  const adapterDefaults = sameRoute ? { ...previous.adapterDefaults } : {}
+  if (reasoningEffort !== undefined) delete adapterDefaults.reasoningEffort
+  return {
+    config,
+    ...(Object.keys(adapterDefaults).length > 0 ? { adapterDefaults } : {}),
+    ...(previous?.tools === undefined ? {} : { tools: previous.tools }),
+  }
 }
 
-/**
- * Config schema.
- *
- * Every field is volatile: the settings page writes them, and a toggle must take
- * effect on the next step rather than restarting the plugin mid-session. The
- * live values are read through `liveValue()` on every step.
- */
+async function enforce(ctx, config, { agent, signal, modelSelection }, messages, budget) {
+  const selection = modelSelection ?? agent.model?.current()
+  if (selection === undefined) return
+  const rule = ruleFor(config, selection)
+  if (rule === undefined) return
+
+  const { session } = agent
+  const meter = ctx.tokenMeter
+  const header = projectedHeader(session, selection)
+  const pendingTokens = messages.reduce((total, message) => total + meter.estimateMessage(message), 0)
+  const line = rule.surchargeAtTokens
+  const cap = Math.max(1, line - config.safetyMarginTokens)
+  const scope = `surcharge guard (${rule.provider}/${rule.model})`
+  const measure = () => meter.measure(session, header)
+  let measurement = measure()
+  let projected = measurement.totalTokens + pendingTokens
+  if (projected < cap || signal.aborted) return
+
+  const warn = reason => ctx.logger.warn(
+    `${scope}: ${reason}; continuing with an estimated ${projected} prompt tokens `
+    + `(trigger ${cap}, surcharge line ${line})`,
+  )
+  if (budget.used >= config.maxAttempts) {
+    if (projected >= line) warn('summary budget exhausted, surcharge possible')
+    return
+  }
+  const compaction = compactionFor(ctx, agent)
+  if (compaction === undefined) {
+    warn('no compaction service')
+    return
+  }
+
+  while (projected >= cap && budget.used < config.maxAttempts && !signal.aborted) {
+    const range = selectRange(session, measurement.nodes, Math.floor(cap * config.retainRatio))
+    if (range === undefined) {
+      warn('no safe history range to compact')
+      return
+    }
+    const before = projected
+    budget.used += 1
+    const result = await compaction.compactRegion(range.start, range.end, agent, signal)
+    if (signal.aborted) return
+    measurement = measure()
+    projected = measurement.totalTokens + pendingTokens
+    ctx.logger.info(`${scope}: folded ${result.shadowedSeqs.length} nodes; estimated ${before} → ${projected} prompt tokens`)
+    if (projected >= before) {
+      warn('compaction did not lower the estimated pressure')
+      return
+    }
+  }
+  if (!signal.aborted && projected >= cap) {
+    warn(projected >= line ? 'still at or above the surcharge line' : 'still within the safety margin')
+  }
+}
+
+/** All fields are volatile so edits apply without restarting a running agent. */
 export const Config = z.object({
   enabled: z.boolean().default(true).volatile(),
   rules: z.array(z.object({
     provider: z.string().required(),
     model: z.string().required(),
-    surchargeAtTokens: z.number().step(1).min(1).required(),
+    surchargeAtTokens: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).required(),
     enabled: z.boolean().default(true),
   })).default([]).volatile(),
-  safetyMarginTokens: z.number().step(1).min(0).default(DEFAULTS.safetyMarginTokens).volatile(),
+  safetyMarginTokens: z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER).default(DEFAULTS.safetyMarginTokens).volatile(),
   retainRatio: z.number().min(0.01).max(0.9).default(DEFAULTS.retainRatio).volatile(),
-  maxAttempts: z.number().step(1).min(0).default(DEFAULTS.maxAttempts).volatile(),
+  maxAttempts: z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER).default(DEFAULTS.maxAttempts).volatile(),
 })
 
-/** Services this plugin cannot run without. */
-export const inject = ['llm', 'tokenMeter']
+export const inject = ['tokenMeter']
 
 export function apply(ctx, rawConfig) {
-  /** Read the current config, unwrapping live references. */
-  const read = () => normalizeConfig(rawConfig)
-
-  // Per-session attempt budget: a summary that refuses to shrink must not be
-  // retried on every step of the same turn.
   const attempts = new WeakMap()
-  const attemptKey = session => session.seq > 0 ? session.surface.nodes.length : 0
 
-  ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
-    const config = read()
-    if (config.enabled && config.rules.length > 0 && !signal.aborted) {
-      const state = attempts.get(agent.session) ?? { key: attemptKey(agent.session), used: 0 }
-      if (state.key !== attemptKey(agent.session)) {
-        state.key = attemptKey(agent.session)
-        state.used = 0
+  ctx.on('agent/pre-step', async (event, next) => {
+    // Let native compaction and other downstream middleware run first, then
+    // price the messages the step will admit (not just the original inbox).
+    const decision = await next()
+    const { agent, signal, turn } = event
+    if (decision.kind !== 'enter' || signal.aborted) return decision
+    try {
+      const config = normalizeConfig(rawConfig)
+      if (!config.enabled || config.rules.length === 0 || config.maxAttempts === 0) return decision
+      let budget = attempts.get(agent.session)
+      if (budget === undefined || budget.turn !== turn) {
+        budget = { turn, used: 0 }
+        attempts.set(agent.session, budget)
       }
-      if (state.used <= config.maxAttempts) {
-        try {
-          const outcome = await enforce(ctx, config, agent, signal)
-          if (outcome === 'compacted' || outcome === 'no-range') state.used += 1
-        } catch (error) {
-          state.used += 1
-          ctx.logger.warn(
-            `surcharge guard: ${error instanceof Error ? error.message : String(error)}; `
-            + 'continuing the step',
-          )
-        }
+      await enforce(ctx, config, event, decision.messages, budget)
+    } catch (error) {
+      if (!signal.aborted) {
+        ctx.logger.warn(`surcharge guard: ${error instanceof Error ? error.message : String(error)}; continuing the step`)
       }
-      attempts.set(agent.session, state)
     }
-    return next()
-  })
+    return decision
+  }, { prepend: true })
 }
 

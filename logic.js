@@ -61,13 +61,13 @@ function liveValue(field, fallback) {
 /** Read a non-negative integer, falling back when the value is unusable. */
 function nonNegativeInteger(value, fallback) {
   const parsed = Math.trunc(Number(value))
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : fallback
 }
 
-/** Read a ratio strictly inside `(0, 1)`, falling back when unusable. */
+/** Read a retention ratio within the same inclusive bounds as Config. */
 function ratioOf(value, fallback) {
   const parsed = Number(value)
-  return Number.isFinite(parsed) && parsed > 0.01 && parsed < 0.9 ? parsed : fallback
+  return Number.isFinite(parsed) && parsed >= 0.01 && parsed <= 0.9 ? parsed : fallback
 }
 
 /**
@@ -81,7 +81,7 @@ export function normalizeRule(entry) {
   const model = typeof entry.model === 'string' ? entry.model.trim() : ''
   const surchargeAtTokens = Math.trunc(Number(entry.surchargeAtTokens))
   if (provider.length === 0 || model.length === 0) return undefined
-  if (!Number.isFinite(surchargeAtTokens) || surchargeAtTokens <= 0) return undefined
+  if (!Number.isSafeInteger(surchargeAtTokens) || surchargeAtTokens <= 0) return undefined
   return { provider, model, surchargeAtTokens, enabled: entry.enabled !== false }
 }
 
@@ -94,7 +94,8 @@ export function normalizeConfig(raw) {
   const source = raw !== null && typeof raw === 'object' ? raw : {}
   const rules = []
   const seen = new Set()
-  for (const candidate of liveValue(source.rules, [])) {
+  const candidates = liveValue(source.rules, [])
+  for (const candidate of Array.isArray(candidates) ? candidates : []) {
     const rule = normalizeRule(candidate)
     if (rule === undefined) continue
     const key = `${rule.provider}\u0000${rule.model}`
@@ -142,7 +143,9 @@ export function balanceCuts(session, nodes) {
     const event = session.eventAt(node.seq)
     if (event === undefined || event.seq !== node.seq) return undefined
     if (event.type === 'assistant/message') {
-      for (const block of event.data.message.content) if (block.type === 'tool-call') open += 1
+      const content = event.data?.message?.content
+      if (!Array.isArray(content)) return undefined
+      for (const block of content) if (block?.type === 'tool-call') open += 1
     } else if (event.type === 'tool/result') {
       open -= 1
     }
@@ -164,7 +167,9 @@ export function balanceCuts(session, nodes) {
  * @returns the inclusive span, or `undefined` when nothing safe is compactable.
  */
 export function selectRange(session, nodes, retainTokens) {
-  if (nodes.length === 0) return undefined
+  const surface = session.surface.nodes
+  if (nodes.length === 0 || nodes.length !== surface.length
+    || nodes.some((node, index) => node.seq !== surface[index])) return undefined
   const cuts = balanceCuts(session, nodes)
   if (cuts === undefined) return undefined
   const head = session.eventAt(nodes[0].seq)
@@ -177,7 +182,7 @@ export function selectRange(session, nodes, retainTokens) {
     keepFrom = index
     if (accumulated >= retainTokens) break
   }
-  if (keepFrom <= firstIdx) return undefined
+  if (keepFrom <= firstIdx || cuts[firstIdx] !== true) return undefined
 
   while (keepFrom > firstIdx && cuts[keepFrom] !== true) keepFrom -= 1
   if (keepFrom <= firstIdx) return undefined
