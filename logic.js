@@ -1,55 +1,10 @@
-/**
- * dsh-surcharge-guard — decision logic, free of any runtime import.
- *
- * Kept separate from `index.js` for one reason: everything here is a pure
- * function of values the caller already has, so it can be unit-tested against a
- * plain fake session instead of a live Cordis context.
- *
- * The two decisions this module owns:
- *
- * 1. WHICH models are guarded. A double-billing threshold is a number the
- *    provider publishes, not a fraction of the context window, so it cannot be
- *    derived — it is recorded per model, and classified into a family only to
- *    prefill that number.
- * 2. WHERE a compaction may cut. A range that splits an assistant tool call
- *    from its result is rejected by the compaction backend, so the cut is
- *    rewinded to the nearest balanced position before any summary is attempted.
- *
- * @module dsh-surcharge-guard/logic
- */
-
-/** Bundle row id, which is also the settings namespace the Client page edits. */
-export const PLUGIN_ID = 'dsh-surcharge-guard'
-
+/** Pure configuration normalization and tool-pair-safe range selection. */
 /** Values used when the row's config omits a field. */
 export const DEFAULTS = Object.freeze({
   safetyMarginTokens: 20000,
   retainRatio: 0.16,
   maxAttempts: 2,
 })
-
-/**
- * Model families whose double-billing threshold the operator documented, with
- * the provider's published number rather than a fraction of the window.
- */
-export const FAMILIES = Object.freeze([
-  Object.freeze({ id: 'gpt', surchargeAtTokens: 272000 }),
-  Object.freeze({ id: 'gemini', surchargeAtTokens: 200000 }),
-  Object.freeze({ id: 'grok', surchargeAtTokens: 200000 }),
-])
-
-/**
- * Classify one model id into a documented family.
- * @param model - provider-owned model id.
- * @returns the family id, or `undefined` when no threshold is documented.
- */
-export function familyOf(model) {
-  const id = String(model).toLowerCase()
-  if (/(^|[-_/:])gpt/.test(id)) return 'gpt'
-  if (id.includes('gemini')) return 'gemini'
-  if (id.includes('grok')) return 'grok'
-  return undefined
-}
 
 /** Unwrap one live (volatile) config reference. */
 function liveValue(field, fallback) {

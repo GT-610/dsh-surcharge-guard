@@ -2,100 +2,42 @@
 
 # dsh-surcharge-guard
 
-Set a double-billing threshold per model, and compact context before a request crosses it. Built for long-context models such as GPT, Gemini and Grok that bill at double rate past a fixed line.
-
-## Why the context window is the wrong knob
-
-DSH decides when to compact with:
-
-```
-T = min(W × thresholdRatio, W − output − headroom)
-```
-
-`W` is the context window. The first term is a fraction of `W`, so **shrinking the window drags the trigger down with it**. For a model billed at double rate past 272K:
-
-| `W` | output | headroom | trigger `T` |
-|---:|---:|---:|---:|
-| 1,050,000 | 128,000 | 65,536 | 840,000 |
-| 272,000 | 128,000 | 65,536 | **78,464** |
-| 272,000 | 32,000 | 22,400 | 217,600 (ceiling) |
-
-Setting the window to 272K does not fire at 272K; it fires at 78K, because `W − output − headroom` collapses first. And `W × 0.8` locks the trigger at 217,600, so a 272K window can never fire near 272K.
-
-This plugin writes the threshold directly and solves for the headroom:
-
-```
-headroom = W − output − (line − safetyMargin)
-```
-
-The window keeps its real capacity; only the trigger position moves.
+Set a long-context surcharge threshold per provider and model in DeepSeek Harness (DSH). The guard tries to compact history near that threshold without changing the model's context window.
 
 ## Usage
 
-After installing, open **Plugins → Surcharge guard**; the form sits on the plugin's own page:
+After enabling the plugin, open **Plugins → Surcharge guard**:
 
-1. Turn the master switch on.
-2. Click "Add all GPT models", "Add all Gemini models" and so on to create rules for every matching model across all providers in one go.
-3. Check each threshold in the table and edit the number where needed. The "Triggers at" column shows the computed compaction point.
+1. Use “Prefill GPT rules”, “Prefill Gemini rules”, or another family button to add suggestions, or enter the provider and model IDs manually. New rules start off.
+2. Check the specific provider's pricing, correct the surcharge threshold, then enable each rule. Prefills are not verified provider rates.
+3. Keep the master switch on. “Triggers at” shows the surcharge threshold minus the safety margin, with a minimum of one token.
 
 | Goal | Action |
 |---|---|
-| Guard only a few models | Bulk add, then set the rest to Off or remove them |
-| Change one model's threshold | Edit the number in the threshold column |
-| Compact less often | Raise the safety margin |
-| Pause everything for a turn | Turn the master switch off; rules are kept |
+| Compact earlier | Raise the safety margin; this may spend more on summaries |
+| Keep more recent history | Raise the retain ratio within `0.01–0.9` |
+| Limit compaction attempts per turn | Set the summary attempt limit, default `2`; `0` disables guard compaction |
+| Pause protection without removing rules | Turn the master switch off |
 
-Number fields accept `272000`, `272K` and `1.05M`.
-
-## Configuration
-
-| Field | Default | Meaning |
-|---|---|---|
-| `enabled` | `true` | Master switch; off stops every rule |
-| `rules` | `[]` | Each is `{ provider, model, surchargeAtTokens, enabled }` |
-| `safetyMarginTokens` | `20000` | How far below the line to trigger |
-| `retainRatio` | `0.16` | Fraction of recent content kept verbatim |
-| `maxAttempts` | `2` | Maximum summary attempts within one turn |
-
-Every field is volatile: changes apply on the next step without restarting the plugin.
-
-## Built-in thresholds
-
-| Family | Line | Match |
-|---|---:|---|
-| GPT | 272K | `gpt` at a word start in the model id |
-| Gemini | 200K | model id contains `gemini` |
-| Grok | 200K | model id contains `grok` |
-
-The thresholds are the providers' published numbers, not derived from the window. When a provider changes pricing, edit the number in the table.
+Thresholds and margins accept values such as `272000`, `272K`, and `1.05M`. Changes apply to subsequent steps without restarting the plugin.
 
 ## Limitations
 
-- **Compaction costs tokens.** Every fold sends a summarization request. With a low threshold and long turns, summarization can cost more than the surcharge it prevents; raise the margin or disable specific models.
-- **The check runs between steps.** A single step that appends a very large tool result can still cross the line before the next check. The safety margin covers ordinary growth, not one enormous append.
-- **A summary may refuse to shrink.** When a region is already dense, the summary can come back no smaller than the original. `maxAttempts` stops it from being retried on every step of the same turn.
-
-## How it works
-
-Before each step the plugin reads the model that step is routed to. When a rule matches and usage enters the safety-margin band, it selects a tool-pairing-balanced span and hands it to the session's own compaction service to fold into one summary.
-
-The plugin writes no new session event type and replaces no service. The only durable writes are the `compaction/start` .. `compaction/end` pair that `compactRegion` already owns, so fork, resume and replay behave exactly as they do without the plugin.
-
-The cut rewinds to the nearest tool-pairing balanced position, and a leading system message is never inside the span.
+- This is **best-effort protection, not a billing cap**. The guard estimates committed history and messages admitted for the step. Later prompt updates, tool definitions, attachment pricing, retries, and provider counts can differ.
+- If there is no safe range, summarization fails, or the estimate remains above the line, the original request is not blocked. The session's DSH backend runs compaction, and its summary request may incur charges. The guard's attempt limit does not cap DSH's built-in compaction or internal backend retries.
 
 ## Development
 
-```
+```sh
 pnpm install
-pnpm check          # syntax + locale consistency + all tests
-pnpm test           # tests only
+pnpm check
 ```
 
-- `logic.js` is a pure, dependency-free module; `tests/logic.test.mjs` tests it directly.
-- `tests/client.test.mjs` mounts the settings page with `react-test-renderer` and a stubbed `fetch`, covering the table, bulk add, commit timing and failure states.
-- `index.js` is the Host half: it registers `agent/pre-step` and three same-origin routes for the settings page.
-- `client.js` is the browser half, registering into `plugins.bundle.config` (keyed by package name). It reads and writes through `configForms`, so no HTTP route is involved.
-- `locale/*.json` holds the display text Plugin Manager reads; the UI strings are inlined in `client.js`, and `scripts/check-locale.mjs` keeps the two copies in step.
+Tests cover host decisions, range selection, and rendering from the registered settings entry. An installed DSH can also exercise the real compaction transaction with an offline summarizer. Run this from the DSH Desktop terminal:
+
+```sh
+ELECTRON_RUN_AS_NODE=1 "$DSH_NODE_EXECUTABLE" --test tests/installed-host.test.mjs
+```
 
 ## License
 

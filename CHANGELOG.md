@@ -1,17 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Estimate pressure for the selected step route and the messages admitted by other pre-step middleware. Remeasure after summaries, warn about unresolved pressure, and leave the original step decision unchanged.
+- Enforce a per-turn compaction attempt budget. Zero disables guard compaction, and an unavailable range does not spend an attempt.
+- Preserve exact numeric settings, expose retention, and support manual rule entry. New rules start disabled until their provider thresholds are confirmed.
+- Distinguish catalog failures from an empty catalog and keep configured models available when a live provider is unavailable.
+- Remove the unreachable bundle-list summary, browser test exports, and unused host family helpers. The `./logic` subpath still exposes normalization and range selection.
+
 ## 0.1.0
 
-Initial release.
-
-- Per-model double-billing threshold with an explicit `surchargeAtTokens` value
-  instead of a derived window fraction.
-- Settings page under **Settings → Surcharge guard** listing every guarded model
-  with its line and computed trigger point.
-- One-click rules for all GPT, Gemini and Grok models across every configured
-  provider, using each provider's published threshold.
-- Safety margin that absorbs token-meter estimation error.
-- Tool-pairing-balanced span selection, so a fold never splits an assistant tool
-  call from its result, and a leading system message is never folded.
-- Volatile configuration: toggles and edits apply on the next step without
-  restarting the plugin.
+- Add an explicit `surchargeAtTokens` value for each provider and model.
+- Configure rules under **Plugins → Surcharge guard**.
+- Use the session's compaction backend with tool-pair-safe range selection and preserve the leading system message.

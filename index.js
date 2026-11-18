@@ -2,8 +2,6 @@
 import z from '@deepseek-ai/schemastery'
 import { DEFAULTS, normalizeConfig, ruleFor, selectRange } from './logic.js'
 
-export { DEFAULTS, FAMILIES, PLUGIN_ID, familyOf, normalizeConfig, normalizeRule, ruleFor, selectRange, balanceCuts } from './logic.js'
-
 function compactionFor(ctx, agent) {
   // Web presets own an isolated backend; a standalone profile may own it at root.
   return ctx.get('agentPresets')?.serviceFor(agent, 'compaction') ?? ctx.get('compaction')

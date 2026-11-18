@@ -1,7 +1,7 @@
 {
   "name": "dsh-surcharge-guard",
   "version": "0.1.0",
-  "description": "Keep chosen models under their provider's double-billing token threshold by compacting before the line, not after the bill.",
+  "description": "Estimate long-context surcharge risk and compact history near per-model thresholds in DeepSeek Harness.",
   "keywords": [
     "dsh",
     "dsh-plugin",

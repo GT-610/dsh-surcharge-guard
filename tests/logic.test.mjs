@@ -7,32 +7,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-const mod = await import('../logic.js')
-
-const { familyOf, normalizeRule, normalizeConfig, ruleFor, balanceCuts, selectRange, FAMILIES } = mod
-
-test('familyOf matches the documented model families', () => {
-  assert.equal(familyOf('gpt-6.1-sol'), 'gpt')
-  assert.equal(familyOf('gpt-6-astra'), 'gpt')
-  assert.equal(familyOf('openai/gpt-5'), 'gpt')
-  assert.equal(familyOf('gemini-3-pro'), 'gemini')
-  assert.equal(familyOf('grok-4'), 'grok')
-  assert.equal(familyOf('deepseek-v4-flash'), undefined)
-  assert.equal(familyOf('claude-opus-4'), undefined)
-})
-
-test('familyOf does not match a stray "gpt" inside another word', () => {
-  // "adaptgpt" must not be classified as a GPT model.
-  assert.equal(familyOf('adaptgpt-1'), undefined)
-  assert.equal(familyOf('my-widget'), undefined)
-})
-
-test('FAMILIES carries the published thresholds, not window fractions', () => {
-  const byId = Object.fromEntries(FAMILIES.map(family => [family.id, family.surchargeAtTokens]))
-  assert.equal(byId.gpt, 272000)
-  assert.equal(byId.gemini, 200000)
-  assert.equal(byId.grok, 200000)
-})
+import { normalizeRule, normalizeConfig, ruleFor, balanceCuts, selectRange } from '../logic.js'
 
 test('normalizeRule rejects unusable entries', () => {
   assert.equal(normalizeRule(null), undefined)
@@ -65,7 +40,7 @@ test('normalizeConfig drops duplicates and fills defaults', () => {
 test('normalizeConfig clamps unusable scalars instead of propagating them', () => {
   const config = normalizeConfig({ safetyMarginTokens: -1, retainRatio: 5, maxAttempts: -3 })
   assert.equal(config.safetyMarginTokens, 20000)
-  assert.ok(config.retainRatio > 0.01 && config.retainRatio < 0.9)
+  assert.equal(config.retainRatio, 0.16)
   assert.equal(config.maxAttempts, 2)
 })
 
@@ -170,4 +145,14 @@ test('selectRange returns undefined when no balanced cut exists', () => {
   // Both nodes are unbalanced, leaving only the system head outside.
   const session = fakeSession([system(1), assistant(2, 1), user(3)])
   assert.equal(selectRange(session, nodesOf(session), 0), undefined)
+})
+
+test('selectRange refuses a measurement from an earlier surface', () => {
+  const session = fakeSession([user(1), user(2), user(3)])
+  assert.equal(selectRange(session, nodesOf(session).slice(1), 1), undefined)
+})
+
+test('balanceCuts refuses an assistant event with missing content', () => {
+  const session = fakeSession([user(1), { seq: 2, type: 'assistant/message', data: { message: {} } }])
+  assert.equal(balanceCuts(session, nodesOf(session)), undefined)
 })
