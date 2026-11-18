@@ -1,223 +1,166 @@
-/**
- * dsh-surcharge-guard — Client half.
- *
- * Renders the plugin's own configuration on its bundle page in **Plugins**
- * (`plugins.bundle.config`, keyed by this package's name), between the
- * description and the rows.
- *
- * The page owns the form: it passes a `ConfigPageForm` (`state` plus `mutate`),
- * so this half keeps no configuration copy and owns no HTTP route. A write
- * lands in the same volatile fields the Host half reads on the next step. The
- * model catalog comes from the shared `remote` gateway; when it is unavailable
- * the same rules are still editable by hand, and the card renders.
- *
- * @module dsh-surcharge-guard/client
- */
+/** Browser settings for the surcharge guard bundle. */
 window.__ModuleLoader__.load({
   id: 'dsh-surcharge-guard',
   factory(require) {
     const React = require('react')
     const h = React.createElement
-
-    /** Bundle key, settings namespace and slot key are one string. */
     const NS = 'dsh-surcharge-guard'
 
-    /** Page strings, kept in step with `locale/*.json` by `scripts/check-locale.mjs`. */
     const zh = {
-      "nav": "计费保护",
-      "title": "计费保护",
-      "intro": "超过起点后，provider 按双倍计费。开启后，插件会在每次请求前检查用量，到线前压缩历史。",
+      "intro": "按服务商和模型设置长上下文加价阈值。插件会在请求前估算用量并尝试压缩历史，但不能保证不越线。",
       "enabled": "启用计费保护",
       "enabledHint": "关闭后所有规则停止生效，已有配置保留。",
       "margin": "安全余量",
-      "marginHint": "在起点以下多少 token 触发压缩。估算有误差，留出余量才不会越线。",
+      "marginHint": "在加价线以下多少 token 触发压缩。余量越大，触发越早。",
       "retain": "保留比例",
-      "retainHint": "压缩时保留最近多少比例的内容不摘要。",
-      "maxAttempts": "重试上限",
-      "maxAttemptsHint": "同一轮内摘要失败的最大重试次数，避免反复调用。",
+      "retainHint": "按触发线的比例计算近期历史保留量，范围为 0.01–0.9。",
+      "maxAttempts": "摘要次数上限",
+      "maxAttemptsHint": "每轮最多发起多少次压缩；0 表示不发起。",
       "rules": "规则",
       "rulesEmpty": "还没有规则。用下面的按钮按家族批量添加，或手动添加单条。",
       "colProvider": "服务商",
       "colModel": "模型",
-      "colLine": "双倍计费起点",
+      "colLine": "加价阈值",
       "colWindow": "上下文窗口",
       "colStatus": "状态",
       "colActions": "操作",
-      "on": "已保护",
+      "on": "已启用",
       "off": "已停用",
       "cap": "到线前触发于",
       "remove": "移除",
       "addTitle": "一键添加",
-      "addHint": "为所有服务商里匹配到的模型添加规则，阈值取 provider 公布的起点。",
-      "addFamily": "添加全部 {family} 模型",
-      "addManual": "手动添加",
+      "addHint": "按模型家族预填建议阈值。新增规则默认停用，请按具体服务商的定价核对后再启用。",
+      "addFamily": "预填 {family} 规则",
+      "addManual": "手动添加规则",
       "scan": "重新扫描模型",
       "scanning": "正在读取模型目录…",
       "noModels": "没有读到任何模型。请确认已在「模型」设置里配置服务商。",
-      "unknownFamily": "未识别的模型需要手动填写起点。",
-      "saved": "已保存",
       "saveFailed": "保存失败",
       "notWritable": "当前配置层不可写，请检查 profile 配置。",
       "loading": "正在加载…",
-      "loadFailed": "读取失败",
-      "retry": "重试",
+      "loadFailed": "模型目录读取失败",
       "familyGpt": "GPT",
       "familyGemini": "Gemini",
       "familyGrok": "Grok",
-      "docs": "说明",
-      "providerAll": "全部服务商",
-      "noCatalog": "未读取到模型目录，请确认服务商已配置；规则仍可手动添加。",
-      "summaryOff": "计费保护已关闭",
-      "summaryNoRules": "已启用，还没有规则",
-      "summaryOn": "正在保护 {count} 个模型",
-      "dormant": "服务商当前未激活"
-}
+      "noCatalog": "实时模型目录不可用，仍可手动添加规则。",
+      "dormant": "未出现在实时目录",
+      "enableRule": "启用",
+      "disableRule": "停用",
+      "manualHint": "输入准确的服务商和模型 ID，以及该服务商的加价阈值。新增规则默认停用。",
+      "manualProvider": "服务商 ID",
+      "manualModel": "模型 ID",
+      "manualLine": "加价阈值（token）",
+      "duplicateRule": "这个服务商和模型已有规则。",
+      "invalidManualRule": "请输入服务商 ID、模型 ID 和正整数阈值。",
+      "invalidNumber": "数值无效，请检查该字段的取值范围。"
+    }
 
     const en = {
-      "nav": "Surcharge guard",
-      "title": "Surcharge guard",
-      "intro": "Past the threshold, the provider bills the request at double rate. With this on, the plugin measures usage before each request and folds history before reaching the line.",
+      "intro": "Set a long-context surcharge threshold per provider and model. The guard estimates pressure and tries to compact history before a request, but cannot guarantee it stays below the line.",
       "enabled": "Enable surcharge guard",
       "enabledHint": "Turning this off stops every rule; saved rules are kept.",
       "margin": "Safety margin",
-      "marginHint": "How far below the threshold to trigger. Measurement is an estimate, so the margin absorbs the error.",
+      "marginHint": "Trigger this many tokens below the surcharge line. A larger margin triggers compaction earlier.",
       "retain": "Retain ratio",
-      "retainHint": "Fraction of recent content kept verbatim when folding.",
-      "maxAttempts": "Retry limit",
-      "maxAttemptsHint": "Maximum summary attempts within one turn, so a stubborn history is not retried forever.",
+      "retainHint": "Fraction of the trigger budget to retain as recent history, from 0.01 to 0.9.",
+      "maxAttempts": "Summary attempt limit",
+      "maxAttemptsHint": "Maximum compaction attempts per turn. Set to 0 to disable guard compaction.",
       "rules": "Rules",
       "rulesEmpty": "No rules yet. Add a model family in bulk below, or add one manually.",
       "colProvider": "Provider",
       "colModel": "Model",
-      "colLine": "Double-billing threshold",
+      "colLine": "Surcharge threshold",
       "colWindow": "Context window",
       "colStatus": "Status",
       "colActions": "Actions",
-      "on": "Guarded",
+      "on": "Enabled",
       "off": "Off",
       "cap": "Triggers at",
       "remove": "Remove",
       "addTitle": "Quick add",
-      "addHint": "Add a rule for every matching model across all providers, using the provider's published threshold.",
-      "addFamily": "Add all {family} models",
-      "addManual": "Add manually",
+      "addHint": "Prefill suggested family thresholds. New rules are off until you confirm the price for the specific provider and enable them.",
+      "addFamily": "Prefill {family} rules",
+      "addManual": "Add a rule manually",
       "scan": "Rescan models",
       "scanning": "Reading model catalog…",
       "noModels": "No models found. Make sure a provider is configured under Models.",
-      "unknownFamily": "Unrecognized models need a manually entered threshold.",
-      "saved": "Saved",
       "saveFailed": "Save failed",
       "notWritable": "This configuration layer is not writable. Check the profile configuration.",
       "loading": "Loading…",
-      "loadFailed": "Failed to load",
-      "retry": "Retry",
+      "loadFailed": "Could not read the model catalog",
       "familyGpt": "GPT",
       "familyGemini": "Gemini",
       "familyGrok": "Grok",
-      "docs": "About",
-      "providerAll": "All providers",
-      "noCatalog": "The model catalog is unavailable. Check that a provider is configured; rules can still be added by hand.",
-      "summaryOff": "Surcharge guard is off",
-      "summaryNoRules": "On, no rules yet",
-      "summaryOn": "Guarding {count} models",
-      "dormant": "provider not active"
-}
+      "noCatalog": "The live model catalog is unavailable. You can still add rules manually.",
+      "dormant": "Not in the live catalog",
+      "enableRule": "Enable",
+      "disableRule": "Disable",
+      "manualHint": "Enter the exact provider and model IDs and the provider’s surcharge threshold. New rules start off.",
+      "manualProvider": "Provider ID",
+      "manualModel": "Model ID",
+      "manualLine": "Surcharge threshold (tokens)",
+      "duplicateRule": "A rule already exists for this provider and model.",
+      "invalidManualRule": "Enter a provider ID, a model ID, and a positive whole-token threshold.",
+      "invalidNumber": "Invalid number. Check the allowed range for this field."
+    }
 
-
-    /** Token thresholds the providers publish, used to prefill a rule. */
     const FAMILIES = [
       { id: 'gpt', surchargeAtTokens: 272000 },
       { id: 'gemini', surchargeAtTokens: 200000 },
       { id: 'grok', surchargeAtTokens: 200000 },
     ]
+    const NAMESPACES = [`include:${NS}`, NS]
+    const PROVIDER_NAMESPACES = ['include:llm-pi-ai', 'llm-pi-ai']
+    const EMPTY_SNAPSHOT = { status: 'unavailable', writable: false }
+    const NO_SUBSCRIBE = () => () => {}
+    const ruleKey = ({ provider, model }) => JSON.stringify([provider, model])
 
-    // { getSnapshot(), subscribe(fn), set(field, value), dispose() }
-
-    /** Snapshot used when the page supplies no form (a summary render). */
-    const EMPTY_SNAPSHOT = { status: 'unavailable', writable: false, value: undefined }
-
-    /**
-     * Every namespace spelling this bundle may be mounted under.
-     *
-     * `configForms` keys a form by its **Loader entry id**, and the profile patch
-     * chooses that id, so the plugin has to ask rather than assume. A bundle
-     * pulled in through `dsh.profile.bundles` composes under an `include:` wrapper,
-     * which is what the live host uses here; the bare package name covers a
-     * directly-inserted row, and the declared name is the last resort.
-     */
-    const NAMESPACE_CANDIDATES = [NS, `include:${NS}`]
-
-    /** Compact a token count for display. */
     function formatTokens(value) {
-      if (typeof value !== 'number' || !Number.isFinite(value)) return '—'
-      if (value >= 1000000) return `${(value / 1000000).toFixed(2)}M`
-      if (value >= 1000) return `${Math.round(value / 1000)}K`
+      if (value >= 1e6) return `${(value / 1e6).toFixed(2)}M`
+      if (value >= 1e3) return `${Math.round(value / 1e3)}K`
       return String(value)
     }
 
-    /** Parse `272000`, `272K` and `1.05M`. */
-    function parseTokens(text) {
-      const raw = String(text).trim().toLowerCase().replace(/[,_\s]/g, '')
-      if (raw.length === 0) return undefined
-      const match = /^([0-9]*\.?[0-9]+)([km])?$/.exec(raw)
-      if (match === null) return undefined
-      const base = Number(match[1])
-      if (!Number.isFinite(base)) return undefined
-      const scale = match[2] === 'm' ? 1000000 : match[2] === 'k' ? 1000 : 1
-      const parsed = Math.round(base * scale)
-      return parsed > 0 ? parsed : undefined
+    function parseTokens(text, min = 0) {
+      const match = /^(\d+(?:\.\d+)?|\.\d+)([km]?)$/i.exec(text.trim().replace(/[,_]/g, ''))
+      if (!match) return undefined
+      const suffix = match[2].toLowerCase()
+      const places = suffix === 'm' ? 6 : suffix === 'k' ? 3 : 0
+      const [whole, fraction = ''] = match[1].split('.')
+      if (/[1-9]/.test(fraction.slice(places))) return undefined
+      const value = Number(whole + fraction.slice(0, places).padEnd(places, '0'))
+      return Number.isSafeInteger(value) && value >= min ? value : undefined
     }
 
-    /**
-     * Read a snapshot from either form shape this card may receive.
-     *
-     * The bundle page hands a `ConfigPageForm` (`{ state, mutate }`) while the
-     * shared service returns a `ConfigForm` (`getSnapshot`, `set`). Both describe
-     * the same namespace, so one reader accepts both.
-     *
-     * @param form - either handle, or `undefined`.
-     * @returns the snapshot, or the unserved one.
-     */
-    function snapshotOf(form) {
-      if (form === undefined) return EMPTY_SNAPSHOT
-      if (form.state !== undefined) return form.state
-      if (typeof form.getSnapshot === 'function') return form.getSnapshot()
-      return EMPTY_SNAPSHOT
+    function parseRatio(text) {
+      if (!/^(?:\d+(?:\.\d+)?|\.\d+)$/.test(text.trim())) return undefined
+      const value = Number(text)
+      return value >= 0.01 && value <= 0.9 ? value : undefined
     }
 
-    /**
-     * Read a form snapshot and stay subscribed to it.
-     *
-     * A write changes the Host document, not this component's props, so without
-     * a subscription the card would keep rendering the values it read on mount
-     * and a saved rule would never appear. `ConfigForm` is a store with
-     * `subscribe`; a page-owned `ConfigPageForm` re-renders the entry itself,
-     * so its `state` is already fresh on every render.
-     *
-     * @param form - the resolved form handle, or `undefined`.
-     * @returns the current snapshot.
-     */
-    function useFormSnapshot(form) {
-      const subscribable = form !== undefined && typeof form.subscribe === 'function'
-        && typeof form.getSnapshot === 'function'
-      // Hooks must run unconditionally, so the fallback store is a stable no-op.
-      return React.useSyncExternalStore(
-        subscribable ? listener => form.subscribe(listener) : NO_SUBSCRIBE,
-        () => snapshotOf(form),
-      )
+    function getOptional(ctx, key) {
+      try { return ctx.get(key) } catch { return undefined }
     }
 
-    /** The no-op subscription used when the handle is not a store. */
-    const NO_SUBSCRIBE = () => () => {}
+    function lookupForm(service, namespace) {
+      try { return service?.get(namespace) } catch { return undefined }
+    }
 
-    /** Whether a value is a live (volatile) reference and not a plain value. */
-    const isLive = value => value !== null && typeof value === 'object' && typeof value.get === 'function'
+    function useNamespaceForm(service, [first, second]) {
+      const a = lookupForm(service, first)
+      const b = lookupForm(service, second)
+      const aSnapshot = useStore(a)
+      const bSnapshot = useStore(b)
+      if (aSnapshot.status === 'ready' || (aSnapshot.status === 'loading' && bSnapshot.status !== 'ready')) {
+        return [a, aSnapshot]
+      }
+      return [b, bSnapshot]
+    }
 
-    /** Resolve one field of a form snapshot, unwrapping a live reference. */
-    function fieldOf(snapshot, key, fallback) {
-      const value = snapshot?.value?.[key]
-      if (value === undefined) return fallback
-      return isLive(value) ? value.get() : value
+    function useStore(store) {
+      const subscribe = React.useCallback(listener => store === undefined ? NO_SUBSCRIBE() : store.subscribe(listener), [store])
+      const snapshot = React.useCallback(() => store?.getSnapshot() ?? EMPTY_SNAPSHOT, [store])
+      return React.useSyncExternalStore(subscribe, snapshot)
     }
 
     /** The styles; only `--dsw-alias-*` tokens, so light/dark follows the host. */
@@ -263,7 +206,6 @@ window.__ModuleLoader__.load({
       },
       hint: { color: 'var(--dsw-alias-label-secondary)', margin: 0, gridColumn: '2 / -1' },
       error: { color: 'var(--dsw-alias-state-error-primary)', margin: 0 },
-      ok: { color: 'var(--dsw-alias-state-success-primary)', margin: 0 },
       button: {
         background: 'var(--dsw-alias-bg-base)',
         color: 'var(--dsw-alias-label-primary)',
@@ -347,520 +289,261 @@ window.__ModuleLoader__.load({
       }))
     }
 
-    /**
-     * A token field that commits on blur or Enter, never per keystroke.
-     *
-     * Each commit is a persisted write, so saving while the user types would
-     * write the profile once per character.
-     */
-    function TokenInput({ label, value, onCommit, disabled, style }) {
-      const [text, setText] = React.useState(formatTokens(value))
-      const [focused, setFocused] = React.useState(false)
-      React.useEffect(() => {
-        if (!focused) setText(formatTokens(value))
-      }, [value, focused])
-
-      const commit = () => {
-        const parsed = parseTokens(text)
-        if (parsed === undefined || parsed === value) {
-          setText(formatTokens(value))
-          return
-        }
-        onCommit(parsed)
-      }
-
+    /** Keep display rounding out of the draft; no edit means no profile write. */
+    function NumericInput({ label, value, onCommit, disabled, parse = parseTokens, format = formatTokens, invalid }) {
+      const [editing, setEditing] = React.useState(null)
+      const dirty = React.useRef(false)
       return h('input', {
-        type: 'text',
-        inputMode: 'numeric',
-        value: text,
-        disabled,
-        'aria-label': label,
-        style: style ?? styles.field,
-        onFocus: () => setFocused(true),
-        onChange: event => setText(event.target.value),
-        onBlur: () => { setFocused(false); commit() },
+        type: 'text', inputMode: 'decimal', value: editing ?? format(value), disabled,
+        'aria-label': label, style: styles.field,
+        onFocus: () => { dirty.current = false; setEditing(String(value)) },
+        onChange: event => { dirty.current = true; setEditing(event.target.value) },
+        onBlur: () => {
+          setEditing(null)
+          if (!dirty.current) return
+          dirty.current = false
+          const parsed = parse(editing ?? String(value))
+          if (parsed === undefined) invalid()
+          else if (parsed !== value) void onCommit(parsed)
+        },
         onKeyDown: event => {
-          if (event.key !== 'Enter') return
-          event.currentTarget.blur()
+          if (event.key === 'Enter') {
+            event.preventDefault()
+            event.currentTarget.blur()
+          }
         },
       })
     }
 
-    /** Resolve the `remote` gateway face that serves the model catalog. */
+    function modelFamily(model) {
+      if (/(^|[-_/:])gpt(?=$|[-_/:0-9])/i.test(model)) return 'gpt'
+      if (/(^|[-_/:])gemini(?=$|[-_/:0-9])/i.test(model)) return 'gemini'
+      if (/(^|[-_/:])grok(?=$|[-_/:0-9])/i.test(model)) return 'grok'
+      return undefined
+    }
+
     function remoteOf(ctx) {
-      for (const name of ['remote.session', 'remote']) {
-        let candidate
-        try {
-          candidate = ctx.get(name)
-        } catch {
-          candidate = undefined
-        }
-        if (candidate === undefined || candidate === null) continue
-        const session = candidate.session ?? candidate
+      for (const key of ['remote.session', 'remote']) {
+        const candidate = getOptional(ctx, key)
+        const session = candidate?.session ?? candidate
         if (typeof session?.modelCatalog === 'function') return session
       }
       return undefined
     }
 
-    /**
-     * Classify a model id into a documented family.
-     * @param id - provider-owned model id.
-     * @returns the family id, or `null` when no threshold is documented.
-     */
-    function familyOf(id) {
-      const lower = String(id).toLowerCase()
-      if (/(^|[-_/:])gpt/.test(lower)) return 'gpt'
-      if (lower.includes('gemini')) return 'gemini'
-      if (lower.includes('grok')) return 'grok'
-      return null
-    }
-
-    /** Namespaces the provider configuration may be mounted under. */
-    const PROVIDER_NAMESPACES = ['llm-pi-ai', 'include:llm-pi-ai']
-
-    /**
-     * Read the models the user declared in Settings -> Models.
-     *
-     * The live catalog lists only providers whose adapter is currently
-     * registered, so a provider with no key is invisible there even though its
-     * models are configured and their thresholds still matter. The settings
-     * document is the declarative source, and it alone carries `contextWindow`.
-     *
-     * @param ctx - the client context.
-     * @returns declared models keyed by `provider` NUL `model`.
-     */
-    function declaredModels(ctx) {
-      const out = new Map()
-      let service
-      try {
-        service = ctx.get('configForms')
-      } catch {
-        return out
-      }
-      if (typeof service?.get !== 'function') return out
-      for (const name of PROVIDER_NAMESPACES) {
-        let snapshot
-        try {
-          snapshot = snapshotOf(service.get(name))
-        } catch {
-          continue
-        }
-        if (snapshot.status !== 'ready') continue
-        const providers = snapshot.value?.providers
-        if (providers === null || typeof providers !== 'object') continue
-        for (const [provider, profile] of Object.entries(providers)) {
-          for (const model of profile?.models ?? []) {
-            if (typeof model?.id !== 'string') continue
-            out.set(`${provider}\u0000${model.id}`, {
-              provider,
-              providerName: profile.displayName ?? provider,
-              model: model.id,
-              name: model.name ?? model.id,
-              contextWindow: model.contextWindow,
-              maxTokens: model.maxTokens,
-            })
-          }
-        }
-        break
-      }
-      return out
-    }
-
-    /**
-     * Collect the models this card can offer, from both live and declared state.
-     *
-     * Live state proves a model can be routed right now; declared state covers a
-     * provider that is configured but dormant, and supplies the context window
-     * the live catalog omits.
-     *
-     * @param ctx - the client context.
-     * @returns the merged rows plus a reason when nothing could be read.
-     */
     async function loadCatalog(ctx) {
-      const rows = new Map()
-      const reasons = []
-      for (const [key, entry] of declaredModels(ctx)) rows.set(key, { ...entry, live: false })
-
       const remote = remoteOf(ctx)
-      if (remote === undefined) {
-        // The shared gateway face is absent; the card says so rather than
-        // claiming no provider is configured.
-        reasons.push('unavailable')
-      } else {
-        try {
-          const answer = await remote.modelCatalog()
-          if (answer !== null && typeof answer === 'object' && answer.ok === true) {
-            const catalog = answer.value ?? {}
-            for (const group of Array.isArray(catalog.groups) ? catalog.groups : []) {
-              const provider = group.id
-              if (typeof provider !== 'string') continue
-              for (const model of group.models ?? []) {
-                if (typeof model.id !== 'string') continue
-                const key = `${provider}\u0000${model.id}`
-                rows.set(key, {
-                  ...rows.get(key),
-                  provider,
-                  providerName: group.name ?? provider,
-                  model: model.id,
-                  name: model.name ?? model.id,
-                  live: true,
-                })
-              }
-            }
-            for (const failure of Array.isArray(catalog.failures) ? catalog.failures : []) {
-              reasons.push(`${failure.name ?? failure.id}: ${failure.message}`)
-            }
-          }
-        } catch (error) {
-          reasons.push(String(error?.message ?? error))
+      if (typeof remote?.modelCatalog !== 'function') return { unavailable: true, groups: [], failures: [] }
+      try {
+        const result = await remote.modelCatalog()
+        if (result?.ok !== true) {
+          return { failed: true, reason: result?.error?.message, groups: [], failures: [] }
         }
+        const { groups = [], failures = [] } = result.value ?? {}
+        return { groups, failures }
+      } catch (error) {
+        return { failed: true, reason: String(error?.message ?? error), groups: [], failures: [] }
       }
-
-      const flat = [...rows.values()].map(row => ({ ...row, family: familyOf(row.model) }))
-      // Live models first, then families, then id, so the useful rows lead.
-      flat.sort((a, b) => (
-        Number(b.live) - Number(a.live)
-        || String(a.family ?? '~').localeCompare(String(b.family ?? '~'))
-        || a.model.localeCompare(b.model)
-      ))
-      return { rows: flat, reason: flat.length === 0 ? reasons.join('; ') || 'empty' : undefined }
     }
 
-    /**
-     * The card.
-     *
-     * The page owner hands over `form` as a `ConfigPageForm`:
-     * `{ state: ConfigFormSnapshot, mutate(ops, revision?) }`. `state` is a
-     * plain snapshot, not a subscribable store, so the page re-renders this
-     * entry itself when the namespace changes.
-     */
-    function Panel({ t, ctx, form }) {
-      const resolved = form ?? formFor(ctx)
-      const snapshot = useFormSnapshot(resolved)
-      const [catalog, setCatalog] = React.useState({ status: 'idle', rows: [] })
-      const [notice, setNotice] = React.useState(undefined)
-      const [busy, setBusy] = React.useState(false)
-
-      const reloadCatalog = React.useCallback(() => {
-        setCatalog(current => ({ ...current, status: 'loading' }))
-        loadCatalog(ctx).then(
-          result => setCatalog({ status: 'ready', rows: result.rows, reason: result.reason }),
-          error => setCatalog({ status: 'failed', rows: [], reason: String(error?.message ?? error) }),
-        )
-      }, [ctx])
-
-      React.useEffect(() => { reloadCatalog() }, [reloadCatalog])
-
-      const writable = snapshot.writable === true
-      const enabled = fieldOf(snapshot, 'enabled', true) !== false
-      const margin = fieldOf(snapshot, 'safetyMarginTokens', 20000)
-      const maxAttempts = fieldOf(snapshot, 'maxAttempts', 2)
-      const rules = fieldOf(snapshot, 'rules', [])
-
-      if (resolved === undefined) {
-        return h('p', { style: styles.error }, t('notWritable'))
-      }
-      if (snapshot.status === 'loading') {
-        return h('p', { style: styles.intro }, t('loading'))
-      }
-      if (snapshot.status === 'unavailable') {
-        return h('p', { style: styles.error }, t('notWritable'))
-      }
-
-      /**
-       * Persist one field, reporting a refusal instead of claiming success.
-       *
-       * One `set` op per field keeps the write atomic under the page's revision
-       * fence: a stale read is refused rather than overwriting a newer edit.
-       */
-      const write = async (field, value) => {
-        if (resolved === undefined) {
-          setNotice({ kind: 'error', text: t('notWritable') })
-          return
+    function mergeCatalog(providers, live) {
+      const rows = new Map()
+      const unknownProviders = new Set(live.failures.map(failure => failure.id))
+      for (const [provider, profile] of Object.entries(providers ?? {})) {
+        for (const { id: model, contextWindow } of profile?.models ?? []) {
+          if (typeof model !== 'string') continue
+          const row = { provider, model, contextWindow,
+            dormant: live.status === 'ready' && !live.failed && !live.unavailable && !unknownProviders.has(provider) }
+          rows.set(ruleKey(row), row)
         }
+      }
+      for (const { id: provider, models } of live.groups) {
+        if (typeof provider !== 'string') continue
+        for (const { id: model } of models ?? []) {
+          if (typeof model !== 'string') continue
+          const key = ruleKey({ provider, model })
+          rows.set(key, { ...rows.get(key), provider, model, dormant: false })
+        }
+      }
+      return rows
+    }
+
+    function useCatalog(ctx) {
+      const [catalog, setCatalog] = React.useState({ status: 'loading', groups: [], failures: [] })
+      const version = React.useRef(0)
+      const reload = React.useCallback(async () => {
+        const current = ++version.current
+        setCatalog(value => ({ ...value, status: 'loading' }))
+        const result = await loadCatalog(ctx)
+        if (current === version.current) setCatalog({ status: 'ready', ...result })
+      }, [ctx])
+      React.useEffect(() => {
+        void reload()
+        return () => { version.current += 1 }
+      }, [reload])
+      return [catalog, reload]
+    }
+
+    function Panel({ t, ctx, form }) {
+      const forms = getOptional(ctx, 'configForms')
+      const [store, storedSnapshot] = useNamespaceForm(form === undefined ? forms : undefined, NAMESPACES)
+      const [, declared] = useNamespaceForm(forms, PROVIDER_NAMESPACES)
+      const snapshot = form?.state ?? storedSnapshot
+      const [catalog, reloadCatalog] = useCatalog(ctx)
+      const [notice, setNotice] = React.useState(null)
+      const [busy, setBusy] = React.useState(false)
+      const writeInFlight = React.useRef(false)
+      const [draft, setDraft] = React.useState({ provider: '', model: '', threshold: '' })
+      const rows = React.useMemo(() => mergeCatalog(declared.value?.providers, catalog), [declared.value, catalog])
+      const rules = snapshot.value?.rules ?? []
+      const enabled = snapshot.value?.enabled !== false
+      const margin = snapshot.value?.safetyMarginTokens ?? 20000
+      const retain = snapshot.value?.retainRatio ?? 0.16
+      const maxAttempts = snapshot.value?.maxAttempts ?? 2
+      const writable = snapshot.writable === true
+      const disabled = !writable || busy
+      const invalid = () => setNotice(t('invalidNumber'))
+
+      if (snapshot.status === 'loading') return h('p', { style: styles.intro }, t('loading'))
+      if (snapshot.status !== 'ready') return h('p', { style: styles.error }, t('notWritable'))
+
+      async function write(field, value) {
+        const target = form ?? store
+        if (!writable || writeInFlight.current) return false
+        writeInFlight.current = true
         setBusy(true)
-        setNotice(undefined)
+        setNotice(null)
         try {
-          const accepted = typeof resolved.set === 'function'
-            ? await resolved.set(field, value)
-            : await resolved.mutate([{ op: 'set', path: [field], value }])
-          if (accepted === false) setNotice({ kind: 'error', text: t('saveFailed') })
+          const accepted = await target.mutate([{ op: 'set', path: [field], value }], snapshot.revision)
+          if (!accepted) setNotice(t('saveFailed'))
+          return accepted
         } catch (error) {
-          setNotice({ kind: 'error', text: `${t('saveFailed')}: ${String(error?.message ?? error)}` })
+          setNotice(`${t('saveFailed')}: ${String(error?.message ?? error)}`)
+          return false
         } finally {
+          writeInFlight.current = false
           setBusy(false)
         }
       }
 
-      /**
-       * Run a click handler's body, reporting a throw instead of losing it.
-       *
-       * A handler that throws mid-way leaves the user with a button that does
-       * nothing and no message, which is the worst failure to debug.
-       *
-       * @param body - the handler body.
-       */
-      const run = body => {
-        try {
-          body()
-        } catch (error) {
-          setNotice({ kind: 'error', text: `${t('saveFailed')}: ${String(error?.message ?? error)}` })
+      const existing = new Set(rules.map(ruleKey))
+      const missingByFamily = new Map(FAMILIES.map(family => [family.id, []]))
+      for (const [key, row] of rows) {
+        if (!existing.has(key)) missingByFamily.get(modelFamily(row.model))?.push(row)
+      }
+      const draftInput = (key, label) => h('input', {
+        type: 'text', style: styles.field, disabled, value: draft[key],
+        'aria-label': t(label), placeholder: t(label),
+        onChange: event => { const { value } = event.target; setDraft(current => ({ ...current, [key]: value })) },
+      })
+
+      async function addManual() {
+        const provider = draft.provider.trim()
+        const model = draft.model.trim()
+        const surchargeAtTokens = parseTokens(draft.threshold, 1)
+        if (!provider || !model || surchargeAtTokens === undefined) {
+          setNotice(t('invalidManualRule'))
+          return
         }
+        const rule = { provider, model, surchargeAtTokens, enabled: false }
+        if (existing.has(ruleKey(rule))) {
+          setNotice(t('duplicateRule'))
+          return
+        }
+        if (await write('rules', [...rules, rule])) setDraft({ provider: '', model: '', threshold: '' })
       }
 
-      const ruleKey = rule => `${rule.provider}\u0000${rule.model}`
-      const ruleIndex = new Map(rules.map(rule => [ruleKey(rule), rule]))
-
-      /** Add every catalog model of one family that has no rule yet. */
-      const addFamily = family => run(() => {
-        let next = [...rules]
-        for (const row of catalog.rows) {
-          if (row.family !== family.id) continue
-          if (next.some(rule => ruleKey(rule) === ruleKey(row))) continue
-          next = [...next, { provider: row.provider, model: row.model, surchargeAtTokens: family.surchargeAtTokens, enabled: true }]
-        }
-        if (next.length !== rules.length) void write('rules', next)
-      })
-
-      const removeRule = rule => run(() => {
-        void write('rules', rules.filter(entry => ruleKey(entry) !== ruleKey(rule)))
-      })
-
-      const setThreshold = (rule, surchargeAtTokens) => run(() => {
-        void write('rules', rules.map(entry => (
-          ruleKey(entry) === ruleKey(rule) ? { ...entry, surchargeAtTokens } : entry
-        )))
-      })
-
-      const toggleRule = rule => run(() => {
-        void write('rules', rules.map(entry => (
-          ruleKey(entry) === ruleKey(rule) ? { ...entry, enabled: !entry.enabled } : entry
-        )))
-      })
-
-      const familyLabel = id => t(`family${id.charAt(0).toUpperCase()}${id.slice(1)}`)
+      const editRule = (key, update) => write('rules', rules.map(rule => ruleKey(rule) === key ? { ...rule, ...update } : rule))
+      const scalarRow = (label, hint, value, field, parse, format) => h(Row, { label: t(label), hint: t(hint) },
+        h(NumericInput, { label: t(label), disabled, value, parse, format, invalid, onCommit: next => write(field, next) }),
+      )
+      const providerFailures = catalog.failures.map(failure => `${failure.name ?? failure.id}: ${failure.message}`).join('; ')
+      const issue = catalog.failed || providerFailures ? [t('loadFailed'), catalog.reason ?? providerFailures].filter(Boolean).join(': ') : null
 
       return h('div', { style: styles.root },
         h('p', { style: styles.intro }, t('intro')),
-        notice === undefined ? null : h('p', {
-          role: notice.kind === 'error' ? 'alert' : undefined,
-          style: notice.kind === 'error' ? styles.error : styles.ok,
-        }, notice.text),
+        notice === null ? null : h('p', { role: 'alert', style: styles.error }, notice),
         writable ? null : h('p', { style: styles.error }, t('notWritable')),
-
         h('div', { style: styles.group },
-          h('div', { style: styles.row },
-            h('span', { style: styles.label }, t('enabled')),
-            h('div', { style: styles.control },
-              h(Toggle, {
-                label: t('enabled'),
-                checked: enabled,
-                disabled: !writable || busy,
-                onChange: next => write('enabled', next),
-              }),
-            ),
-            h('p', { style: styles.hint }, t('enabledHint')),
-          ),
-          h(Row, { label: t('margin'), hint: t('marginHint') },
-            h(TokenInput, {
-              label: t('margin'),
-              value: margin,
-              disabled: !writable || busy,
-              onCommit: next => write('safetyMarginTokens', next),
-            }),
-          ),
-          h(Row, { label: t('maxAttempts'), hint: t('maxAttemptsHint') },
-            h(TokenInput, {
-              label: t('maxAttempts'),
-              value: maxAttempts,
-              disabled: !writable || busy,
-              onCommit: next => write('maxAttempts', next),
-            }),
-          ),
+          h(Row, { label: t('enabled'), hint: t('enabledHint') },
+            h(Toggle, { label: t('enabled'), checked: enabled, disabled, onChange: next => write('enabled', next) })),
+          scalarRow('margin', 'marginHint', margin, 'safetyMarginTokens'),
+          scalarRow('retain', 'retainHint', retain, 'retainRatio', parseRatio, String),
+          scalarRow('maxAttempts', 'maxAttemptsHint', maxAttempts, 'maxAttempts', parseTokens, String),
         ),
-
         h('div', { style: styles.group },
           h('h4', { style: styles.groupTitle }, t('rules')),
-          rules.length === 0
-            ? h('p', { style: styles.empty }, t('rulesEmpty'))
-            : h('table', { style: styles.table },
-                h('thead', null, h('tr', null,
-                  h('th', { style: styles.th }, t('colProvider')),
-                  h('th', { style: styles.th }, t('colModel')),
-                  h('th', { style: styles.th }, t('colLine')),
-                  h('th', { style: styles.th }, t('cap')),
-                  h('th', { style: styles.th }, t('colStatus')),
-                  h('th', { style: styles.th }, t('colActions')),
-                )),
-                h('tbody', null, rules.map(rule => {
-                  const row = catalog.rows.find(entry => (
-                    entry.provider === rule.provider && entry.model === rule.model
-                  ))
-                  const triggersAt = Math.max(1, rule.surchargeAtTokens - margin)
-                  return h('tr', { key: ruleKey(rule) },
-                    h('td', { style: { ...styles.td, ...styles.mono } }, rule.provider),
-                    h('td', { style: styles.td },
-                      h('div', null, rule.model),
-                      h('div', { style: { ...styles.hint, gridColumn: 'auto' } },
-                        [
-                          row?.contextWindow === undefined ? null : `${t('colWindow')} ${formatTokens(row.contextWindow)}`,
-                          // A declared model whose provider is not registered right
-                          // now: the rule still applies once it is.
-                          row !== undefined && row.live === false ? t('dormant') : null,
-                        ].filter(Boolean).join(' · ')),
-                    ),
-                    h('td', { style: styles.td },
-                      h(TokenInput, {
-                        label: `${t('colLine')} ${rule.model}`,
-                        value: rule.surchargeAtTokens,
-                        disabled: !writable || busy,
-                        onCommit: next => setThreshold(rule, next),
-                      }),
-                    ),
-                    h('td', { style: { ...styles.td, ...styles.mono } }, formatTokens(triggersAt)),
-                    h('td', { style: styles.td }, rule.enabled === false ? t('off') : t('on')),
-                    h('td', { style: styles.td },
-                      h('div', { style: styles.actions },
-                        h('button', {
-                          type: 'button',
-                          disabled: !writable || busy,
-                          style: styles.button,
-                          onClick: () => toggleRule(rule),
-                        }, rule.enabled === false ? t('on') : t('off')),
-                        h('button', {
-                          type: 'button',
-                          disabled: !writable || busy,
-                          style: { ...styles.button, ...styles.danger },
-                          onClick: () => removeRule(rule),
-                        }, t('remove')),
-                      ),
-                    ),
-                  )
-                })),
-              ),
+          rules.length === 0 ? h('p', { style: styles.empty }, t('rulesEmpty')) :
+            h('table', { style: styles.table },
+              h('thead', null, h('tr', null, ...['colProvider', 'colModel', 'colLine', 'cap', 'colStatus', 'colActions']
+                .map(key => h('th', { key, scope: 'col', style: styles.th }, t(key))))),
+              h('tbody', null, ...rules.map(rule => {
+                const key = ruleKey(rule)
+                const row = rows.get(key)
+                const state = rule.enabled !== false
+                const details = [
+                  row?.contextWindow === undefined ? null : `${t('colWindow')} ${formatTokens(row.contextWindow)}`,
+                  row?.dormant ? t('dormant') : null,
+                ].filter(Boolean)
+                return h('tr', { key },
+                  h('td', { style: { ...styles.td, ...styles.mono } }, rule.provider),
+                  h('td', { style: styles.td }, rule.model, details.length ? h('div', { style: styles.hint }, details.join(' · ')) : null),
+                  h('td', { style: styles.td }, h(NumericInput, {
+                    label: `${t('colLine')} ${rule.provider}/${rule.model}`,
+                    value: rule.surchargeAtTokens, disabled, invalid, parse: text => parseTokens(text, 1),
+                    onCommit: surchargeAtTokens => editRule(key, { surchargeAtTokens }),
+                  })),
+                  h('td', { style: styles.td }, formatTokens(Math.max(1, rule.surchargeAtTokens - margin))),
+                  h('td', { style: styles.td }, t(state ? 'on' : 'off')),
+                  h('td', { style: styles.td }, h('div', { style: styles.actions },
+                    h('button', { type: 'button', disabled, style: styles.button,
+                      onClick: () => editRule(key, { enabled: !state }) }, t(state ? 'disableRule' : 'enableRule')),
+                    h('button', { type: 'button', disabled, style: { ...styles.button, ...styles.danger },
+                      onClick: () => write('rules', rules.filter(entry => ruleKey(entry) !== key)) }, t('remove')),
+                  )),
+                )
+              })),
+            ),
         ),
-
         h('div', { style: styles.group },
           h('h4', { style: styles.groupTitle }, t('addTitle')),
-          h('p', { style: { ...styles.intro, padding: 0 } }, t('addHint')),
+          h('p', { style: styles.intro }, t('addHint')),
           catalog.status === 'loading' ? h('p', { style: styles.intro }, t('scanning')) : null,
-          catalog.status === 'failed'
-            ? h('p', { role: 'alert', style: styles.error }, `${t('loadFailed')}: ${catalog.reason}`)
-            : null,
-          catalog.status === 'ready' && catalog.rows.length === 0
-            ? h('p', { style: styles.intro }, catalog.reason === 'unavailable'
-                ? t('noCatalog')
-                : catalog.reason === undefined || catalog.reason === 'empty'
-                  ? t('noModels')
-                  : `${t('noModels')} (${catalog.reason})`)
-            : null,
+          issue === null ? null : h('p', { role: 'alert', style: styles.error }, issue),
+          catalog.status === 'ready' && issue === null && (catalog.unavailable || rows.size === 0)
+            ? h('p', { style: styles.intro }, t(catalog.unavailable ? 'noCatalog' : 'noModels')) : null,
           h('div', { style: styles.actions },
-            ...FAMILIES.map(family => {
-              const matched = catalog.rows.filter(row => row.family === family.id)
+            ...FAMILIES.map(({ id, surchargeAtTokens }) => {
+              const found = missingByFamily.get(id)
+              const label = t(`family${id[0].toUpperCase()}${id.slice(1)}`)
               return h('button', {
-                key: family.id,
-                type: 'button',
-                disabled: !writable || busy || matched.length === 0,
-                style: { ...styles.button, ...(matched.length === 0 ? { opacity: 0.5 } : {}) },
-                onClick: () => addFamily(family),
-              }, `${t('addFamily').replace('{family}', familyLabel(family.id))} (${matched.length})`)
+                key: id, type: 'button', style: styles.button,
+                disabled: disabled || found.length === 0,
+                onClick: () => write('rules', [...rules, ...found.map(({ provider, model }) => ({
+                  provider, model, surchargeAtTokens, enabled: false,
+                }))]),
+              }, `${t('addFamily').replace('{family}', label)} (${found.length})`)
             }),
-            h('button', {
-              type: 'button',
-              style: styles.button,
-              onClick: reloadCatalog,
-            }, t('scan')),
+            h('button', { type: 'button', style: styles.button, onClick: reloadCatalog }, t('scan')),
+          ),
+          h('h4', { style: styles.groupTitle }, t('addManual')),
+          h('p', { style: styles.intro }, t('manualHint')),
+          h('div', { style: styles.actions },
+            draftInput('provider', 'manualProvider'), draftInput('model', 'manualModel'), draftInput('threshold', 'manualLine'),
+            h('button', { type: 'button', disabled, style: styles.button, onClick: addManual }, t('addManual')),
           ),
         ),
       )
     }
 
-    /**
-     * The slot component.
-     *
-     * The page asks for one of two views of the same entry: `summary` is the
-     * one-liner drawn in the plugin list, `page` is the body of the plugin's own
-     * page. Rendering the whole form for `summary` would stretch every row of
-     * the list, so the two are separate components.
-     */
-    const Card = props => {
-      const t = props.t ?? clientCtx.locale.bind(NS)
-      if (props.view === 'summary') return h(Summary, { t, ctx: clientCtx, form: props.form })
-      return h(Panel, { t, ctx: clientCtx, form: props.form })
-    }
-
-    /**
-     * The one-liner the plugin list draws for this entry.
-     *
-     * States the guard's current posture in one sentence, so the list answers
-     * "is this on, and how many models are guarded" without opening the page.
-     */
-    function Summary({ t, form, ctx }) {
-      const resolved = form ?? formFor(ctx)
-      const snapshot = useFormSnapshot(resolved)
-      if (snapshot.status === 'loading') return h('span', null, t('loading'))
-      if (snapshot.status !== 'ready') return h('span', null, t('notWritable'))
-      if (fieldOf(snapshot, 'enabled', true) === false) return h('span', null, t('summaryOff'))
-      const rules = fieldOf(snapshot, 'rules', [])
-      const active = rules.filter(rule => rule.enabled !== false).length
-      if (active === 0) return h('span', null, t('summaryNoRules'))
-      return h('span', null, t('summaryOn').replace('{count}', String(active)))
-    }
-
-    let clientCtx
-
-    /**
-     * Find the shared form for whichever namespace this bundle is mounted under.
-     *
-     * The service is read through `ctx.get` on every apply rather than cached at
-     * module scope: the settings provider may activate after this bundle.
-     *
-     * @param ctx - the client context.
-     * @returns the form, or `undefined` when no candidate namespace is served.
-     */
-    function formFor(ctx) {
-      let service
-      try {
-        service = ctx.get('configForms')
-      } catch {
-        service = undefined
-      }
-      if (typeof service?.get !== 'function') return undefined
-      for (const name of NAMESPACE_CANDIDATES) {
-        try {
-          const candidate = service.get(name)
-          // An unserved namespace still yields a form; its snapshot says so.
-          if (snapshotOf(candidate).status !== 'unavailable') return candidate
-        } catch {
-          // Try the next spelling.
-        }
-      }
-      // Nothing served: return the first candidate so the card can explain why.
-      try {
-        return service.get(NAMESPACE_CANDIDATES[0])
-      } catch {
-        return undefined
-      }
-    }
-
     return {
       inject: ['slots', 'locale'],
-      /** Exposed for the render tests; the shell reads only `inject` and `apply`. */
-      __page: Panel,
-      __summary: Summary,
       apply(ctx) {
-        clientCtx = ctx
-        // Dictionaries first, so the card's text resolves on the first render.
-        clientCtx.effect(() => clientCtx.locale.register(NS, { zh, en }), 'surcharge-guard: dictionaries')
-        const t = clientCtx.locale.bind(NS)
-
-        // Keyed by this package's name: the card renders on this bundle's page in
-        // Plugins, between its description and its rows.
-        clientCtx.slots.inject('plugins.bundle.config', () => clientCtx.slots.register({
-          name: 'plugins.bundle.config',
-          key: NS,
-          locale: NS,
-        }, Card))
+        ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'surcharge-guard: dictionaries')
+        const t = ctx.locale.bind(NS)
+        ctx.slots.inject('plugins.bundle.config', () => ctx.slots.register({
+          name: 'plugins.bundle.config', key: NS, locale: NS,
+        }, props => h(Panel, { t: props.t ?? t, ctx, form: props.form })))
       },
     }
   },
