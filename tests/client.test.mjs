@@ -27,7 +27,7 @@ const groups = { ok: true, value: { groups: [{ id: 'p', models: [
   { id: rule.model }, { id: 'gpt-6-luna' }, { id: 'gptish-model' },
 ] }], failures: [] } }
 
-function formStore(value, { writable = true, status = 'ready', refusal = false, error } = {}) {
+function formStore(value, { writable = true, status = 'ready', refusal = false, error, beforeWrite } = {}) {
   let snapshot = { writable, status, value, revision: 10 }
   const writes = []
   const listeners = new Set()
@@ -41,6 +41,7 @@ function formStore(value, { writable = true, status = 'ready', refusal = false, 
     },
     async mutate(ops, revision) {
       writes.push({ ops, revision })
+      if (beforeWrite) await beforeWrite(writes.length)
       if (error) throw error
       if (refusal || revision !== snapshot.revision) return false
       const value = { ...snapshot.value }
@@ -134,6 +135,37 @@ test('rounded display never saves on focus or blur, and edits only save after co
   await firing(field, 'onFocus')
   assert.equal(field().props.value, '1000001')
   await firing(field, 'onBlur')
+})
+
+test('explains a blocked Enable while the blurred threshold saves, then allows retry', async t => {
+  for (const refusal of [false, true]) {
+    let finish
+    const pending = new Promise(resolve => { finish = resolve })
+    const off = { ...rule, enabled: false }
+    const form = formStore({ ...normal, rules: [off] }, { refusal, beforeWrite: count => count === 1 ? pending : undefined })
+    const ui = await mount(t, { form })
+    await editNumber(ui, fieldLabel, '300K')
+    const status = () => ui.root.root.findByProps({ role: 'status' }).children.join('')
+    assert.equal(ui.button(en.enableRule).props.disabled, true)
+    assert.equal(status(), en.saving)
+    const updated = { ...off, surchargeAtTokens: 300000 }
+    assert.deepEqual(form.writes, [mutation('rules', [updated])])
+
+    await act(async () => { finish() })
+    assert.equal(ui.button(en.enableRule).props.disabled, false)
+    if (refusal) {
+      assert.equal(status(), '')
+      assert.equal(ui.root.root.findByProps({ role: 'alert' }).children.join(''), en.saveFailed)
+      assert.deepEqual(form.getSnapshot().value.rules, [off])
+    } else {
+      assert.equal(status(), en.thresholdSaved)
+      assert.deepEqual(form.getSnapshot().value.rules, [updated])
+      await ui.click(en.enableRule)
+      assert.deepEqual(form.writes[1], mutation('rules', [{ ...updated, enabled: true }], 11))
+      assert.equal(status(), '')
+      assert.ok(ui.button(en.disableRule))
+    }
+  }
 })
 
 test('accepts zero only for nonnegative fields and enforces inclusive retention bounds', async t => {

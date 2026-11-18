@@ -35,6 +35,8 @@ window.__ModuleLoader__.load({
       "scan": "重新扫描模型",
       "scanning": "正在读取模型目录…",
       "noModels": "没有读到任何模型。请确认已在「模型」设置里配置服务商。",
+      "saving": "正在保存。请等待保存完成后，再点击规则操作按钮。",
+      "thresholdSaved": "阈值已保存。若要启用或停用规则，请另行点击对应按钮。",
       "saveFailed": "保存失败",
       "notWritable": "当前配置层不可写，请检查 profile 配置。",
       "loading": "正在加载…",
@@ -84,6 +86,8 @@ window.__ModuleLoader__.load({
       "scan": "Rescan models",
       "scanning": "Reading model catalog…",
       "noModels": "No models found. Make sure a provider is configured under Models.",
+      "saving": "Saving settings. Wait for the save to finish, then click the rule action again.",
+      "thresholdSaved": "Threshold saved. To enable or disable the rule, click its action button separately.",
       "saveFailed": "Save failed",
       "notWritable": "This configuration layer is not writable. Check the profile configuration.",
       "loading": "Loading…",
@@ -391,7 +395,7 @@ window.__ModuleLoader__.load({
       const snapshot = form?.state ?? storedSnapshot
       const [catalog, reloadCatalog] = useCatalog(ctx)
       const [notice, setNotice] = React.useState(null)
-      const [busy, setBusy] = React.useState(false)
+      const [writeStatus, setWriteStatus] = React.useState(null)
       const writeInFlight = React.useRef(false)
       const [draft, setDraft] = React.useState({ provider: '', model: '', threshold: '' })
       const rows = React.useMemo(() => mergeCatalog(declared.value?.providers, catalog), [declared.value, catalog])
@@ -401,28 +405,33 @@ window.__ModuleLoader__.load({
       const retain = snapshot.value?.retainRatio ?? 0.16
       const maxAttempts = snapshot.value?.maxAttempts ?? 2
       const writable = snapshot.writable === true
-      const disabled = !writable || busy
-      const invalid = () => setNotice(t('invalidNumber'))
+      const disabled = !writable || writeStatus === 'saving'
+      const invalid = () => {
+        setWriteStatus(current => current === 'thresholdSaved' ? null : current)
+        setNotice(t('invalidNumber'))
+      }
 
       if (snapshot.status === 'loading') return h('p', { style: styles.intro }, t('loading'))
       if (snapshot.status !== 'ready') return h('p', { style: styles.error }, t('notWritable'))
 
-      async function write(field, value) {
+      async function write(field, value, successStatus = null) {
         const target = form ?? store
         if (!writable || writeInFlight.current) return false
         writeInFlight.current = true
-        setBusy(true)
+        setWriteStatus('saving')
         setNotice(null)
+        let status = null
         try {
           const accepted = await target.mutate([{ op: 'set', path: [field], value }], snapshot.revision)
-          if (!accepted) setNotice(t('saveFailed'))
+          if (accepted) status = successStatus
+          else setNotice(t('saveFailed'))
           return accepted
         } catch (error) {
           setNotice(`${t('saveFailed')}: ${String(error?.message ?? error)}`)
           return false
         } finally {
           writeInFlight.current = false
-          setBusy(false)
+          setWriteStatus(status)
         }
       }
 
@@ -453,7 +462,8 @@ window.__ModuleLoader__.load({
         if (await write('rules', [...rules, rule])) setDraft({ provider: '', model: '', threshold: '' })
       }
 
-      const editRule = (key, update) => write('rules', rules.map(rule => ruleKey(rule) === key ? { ...rule, ...update } : rule))
+      const editRule = (key, update, successStatus) => write('rules',
+        rules.map(rule => ruleKey(rule) === key ? { ...rule, ...update } : rule), successStatus)
       const scalarRow = (label, hint, value, field, parse, format) => h(Row, { label: t(label), hint: t(hint) },
         h(NumericInput, { label: t(label), disabled, value, parse, format, invalid, onCommit: next => write(field, next) }),
       )
@@ -472,7 +482,10 @@ window.__ModuleLoader__.load({
           scalarRow('maxAttempts', 'maxAttemptsHint', maxAttempts, 'maxAttempts', parseTokens, String),
         ),
         h('div', { style: styles.group },
-          h('h4', { style: styles.groupTitle }, t('rules')),
+          h('div', { style: styles.actions },
+            h('h4', { style: styles.groupTitle }, t('rules')),
+            h('span', { role: 'status', style: styles.intro }, writeStatus === null ? null : t(writeStatus)),
+          ),
           rules.length === 0 ? h('p', { style: styles.empty }, t('rulesEmpty')) :
             h('table', { style: styles.table },
               h('thead', null, h('tr', null, ...['colProvider', 'colModel', 'colLine', 'cap', 'colStatus', 'colActions']
@@ -491,7 +504,7 @@ window.__ModuleLoader__.load({
                   h('td', { style: styles.td }, h(NumericInput, {
                     label: `${t('colLine')} ${rule.provider}/${rule.model}`,
                     value: rule.surchargeAtTokens, disabled, invalid, parse: text => parseTokens(text, 1),
-                    onCommit: surchargeAtTokens => editRule(key, { surchargeAtTokens }),
+                    onCommit: surchargeAtTokens => editRule(key, { surchargeAtTokens }, 'thresholdSaved'),
                   })),
                   h('td', { style: styles.td }, formatTokens(Math.max(1, rule.surchargeAtTokens - margin))),
                   h('td', { style: styles.td }, t(state ? 'on' : 'off')),

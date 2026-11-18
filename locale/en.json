@@ -32,6 +32,8 @@
   "scan": "Rescan models",
   "scanning": "Reading model catalog…",
   "noModels": "No models found. Make sure a provider is configured under Models.",
+  "saving": "Saving settings. Wait for the save to finish, then click the rule action again.",
+  "thresholdSaved": "Threshold saved. To enable or disable the rule, click its action button separately.",
   "saveFailed": "Save failed",
   "notWritable": "This configuration layer is not writable. Check the profile configuration.",
   "loading": "Loading…",
