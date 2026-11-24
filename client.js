@@ -32,7 +32,7 @@ window.__ModuleLoader__.load({
       "disableAll": "全部停用",
       "rulesSummary": "已启用 {on}/{total}",
       "addTitle": "一键添加",
-      "addHint": "按模型家族预填建议阈值。新增规则默认停用，请按具体服务商的定价核对后再启用。",
+      "addHint": "按模型家族预填建议阈值。新增规则默认启用；预填的阈值只是建议值，请按具体服务商的定价核对后调整。",
       "addFamily": "预填 {family} 规则",
       "addManual": "手动添加规则",
       "scan": "重新扫描模型",
@@ -51,7 +51,7 @@ window.__ModuleLoader__.load({
       "dormant": "未出现在实时目录",
       "enableRule": "启用",
       "disableRule": "停用",
-      "manualHint": "输入准确的服务商和模型 ID，以及该服务商的加价阈值。新增规则默认停用。",
+      "manualHint": "输入准确的服务商和模型 ID，以及该服务商的加价阈值。新增规则默认启用。",
       "manualProvider": "服务商 ID",
       "manualModel": "模型 ID",
       "manualLine": "加价阈值（token）",
@@ -93,7 +93,7 @@ window.__ModuleLoader__.load({
       "disableAll": "Disable all",
       "rulesSummary": "{on}/{total} enabled",
       "addTitle": "Quick add",
-      "addHint": "Prefill suggested family thresholds. New rules are off until you confirm the price for the specific provider and enable them.",
+      "addHint": "Prefill suggested family thresholds. New rules start enabled; the prefilled threshold is only a suggestion, so check the price for the specific provider.",
       "addFamily": "Prefill {family} rules",
       "addManual": "Add a rule manually",
       "scan": "Rescan models",
@@ -112,7 +112,7 @@ window.__ModuleLoader__.load({
       "dormant": "Not in the live catalog",
       "enableRule": "Enable",
       "disableRule": "Disable",
-      "manualHint": "Enter the exact provider and model IDs and the provider’s surcharge threshold. New rules start off.",
+      "manualHint": "Enter the exact provider and model IDs and the provider’s surcharge threshold. New rules start enabled.",
       "manualProvider": "Provider ID",
       "manualModel": "Model ID",
       "manualLine": "Surcharge threshold (tokens)",
@@ -586,7 +586,7 @@ window.__ModuleLoader__.load({
           setNotice(t('invalidManualRule'))
           return
         }
-        const rule = { provider, model, surchargeAtTokens, enabled: false }
+        const rule = { provider, model, surchargeAtTokens, enabled: true }
         if (existing.has(ruleKey(rule))) {
           setNotice(t('duplicateRule'))
           return
@@ -720,7 +720,7 @@ window.__ModuleLoader__.load({
                 key: id, type: 'button', style: styles.button,
                 disabled: disabled || found.length === 0,
                 onClick: () => write('rules', [...rules, ...found.map(({ provider, model }) => ({
-                  provider, model, surchargeAtTokens, enabled: false,
+                  provider, model, surchargeAtTokens, enabled: true,
                 }))]),
               }, `${t('addFamily').replace('{family}', label)} (${found.length})`)
             }),

@@ -199,15 +199,17 @@ test('accepts zero only for nonnegative fields and enforces inclusive retention 
   assert.equal(ui.form.writes.length, 4)
 })
 
-test('prefills only the missing family matches and leaves every new rule off', async t => {
+test('prefills only the missing family matches and turns every new rule on', async t => {
+  // A rule the user just configured should be in force: the prefilled
+  // threshold is a suggestion, not a reason to leave the rule dormant.
   const ui = await mount(t)
   await ui.click(familyLabel(1))
-  const added = { provider: 'p', model: 'gpt-6-luna', surchargeAtTokens: 272000, enabled: false }
+  const added = { provider: 'p', model: 'gpt-6-luna', surchargeAtTokens: 272000, enabled: true }
   assert.deepEqual(ui.form.writes, [mutation('rules', [rule, added])])
   const rows = ui.root.root.findAllByType('tr')
   assert.equal(rows.length, 3)
-  assert.ok(ui.rowStatus(2).includes(en.off))
-  assert.equal(ui.switchFor(ui.rowSwitch(added)).props['aria-checked'], 'false')
+  assert.ok(ui.rowStatus(2).includes(en.on))
+  assert.equal(ui.switchFor(ui.rowSwitch(added)).props['aria-checked'], 'true')
   assert.equal(ui.button(familyLabel(0)).props.disabled, true)
 })
 
@@ -234,15 +236,17 @@ test('allows a hand-entered rule without a catalog, rejects duplicates, and rend
     await ui.click(en.addManual)
   }
   await enter()
-  const newRule = { provider: 'custom', model: 'other-model', surchargeAtTokens: 300000, enabled: false }
+  const newRule = { provider: 'custom', model: 'other-model', surchargeAtTokens: 300000, enabled: true }
   assert.deepEqual(ui.form.writes, [mutation('rules', [newRule])])
   assert.equal(ui.input(en.manualProvider).props.value, '')
   await enter()
   assert.ok(ui.text().includes(en.duplicateRule))
   assert.equal(ui.form.writes.length, 1)
-  await ui.flip(ui.rowSwitch(newRule))
-  assert.deepEqual(ui.form.writes[1], mutation('rules', [{ ...newRule, enabled: true }], 11))
   assert.ok(ui.rowStatus(1).includes(en.on))
+  // Switching a rule it just added is one click, and it still works both ways.
+  await ui.flip(ui.rowSwitch(newRule))
+  assert.deepEqual(ui.form.writes[1], mutation('rules', [{ ...newRule, enabled: false }], 11))
+  assert.ok(ui.rowStatus(1).includes(en.off))
   await ui.click(en.remove)
   assert.deepEqual(ui.form.writes[2], mutation('rules', [], 12))
   assert.ok(ui.text().includes(en.rulesEmpty))

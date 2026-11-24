@@ -4,7 +4,7 @@ Some providers charge more for long prompts even when the request still fits the
 
 ## Configure protection
 
-Open **Plugins → Surcharge guard**. Enter a rule manually, or prefill suggestions for matching GPT, Gemini, or Grok model IDs. New rules start off. Confirm the threshold against your provider's pricing before turning a rule on.
+Open **Plugins → Surcharge guard**. Enter a rule manually, or prefill suggestions for matching GPT, Gemini, or Grok model IDs. New rules start enabled, so one takes effect as soon as it is added; the prefilled threshold is only a suggestion and should be checked against the provider's pricing.
 
 Each rule's status column carries a switch and a state badge, and a disabled rule's provider and model are dimmed. The table header offers one **Enable all / Disable all** button plus an enabled count, so a prefilled batch can be turned on in one step.
 

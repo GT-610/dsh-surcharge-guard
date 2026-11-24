@@ -1,9 +1,12 @@
 # Changelog
 
 ## Unreleased
+- Start new rules enabled, from both the family prefill and the manual form. A rule the user just
+  configured should be in force; the prefilled threshold is documented as a suggestion to check, and
+  a row can still be switched off or silenced with **Disable all**.
 - Make a rule's on/off state visible where it is changed: the status column is now a switch with a
   coloured badge, a disabled rule dims its provider and model, and the table header carries one
-  **Enable all / Disable all** button plus an enabled count. New rules still start off.
+  **Enable all / Disable all** button plus an enabled count.
 
 - Stop folding the same step twice. The guard now runs one transaction per step and reports a residual gap instead of chasing it, because a second fold can only re-summarize the checkpoint the first one wrote. It also leaves a step alone when another middleware already replaced the surface: native pressure compaction runs in the same pre-step chain, so the guard was stacking a second summary on top of it.
 - Choose the verbatim tail from the gap instead of a fixed fraction of the trigger. `retentionBudget` narrows the tail toward its floor when the recorded pressure sits far above the trigger, so one fold can land under the line; `foldFloor` prices the replacement checkpoint and the minimum reclaim that makes a fold worth a model call.
