@@ -7,7 +7,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { normalizeRule, normalizeConfig, ruleFor, balanceCuts, selectRange } from '../logic.js'
+import {
+  normalizeRule, normalizeConfig, ruleFor, balanceCuts, selectRange, retentionBudget, foldFloor,
+} from '../logic.js'
 
 test('normalizeRule rejects unusable entries', () => {
   assert.equal(normalizeRule(null), undefined)
@@ -199,4 +201,58 @@ test('selectRange refuses a measurement from an earlier surface', () => {
 test('balanceCuts refuses an assistant event with missing content', () => {
   const session = fakeSession([user(1), { seq: 2, type: 'assistant/message', data: { message: {} } }])
   assert.equal(balanceCuts(session, nodesOf(session)), undefined)
+})
+
+// ---- fold-worthiness -------------------------------------------------------
+
+/** A user message that is the replacement checkpoint of a previous fold. */
+const checkpoint = seq => ({
+  seq,
+  type: 'user/message',
+  data: { source: { kind: 'compact-checkpoint' } },
+})
+
+/** Priced nodes from plain token counts, one per surface position. */
+const priced = tokens => tokens.map((count, index) => ({ seq: index + 1, tokens: count }))
+
+test('selectRange refuses a span made only of checkpoints', () => {
+  const session = fakeSession([system(1), checkpoint(2), checkpoint(3)])
+  assert.equal(selectRange(session, priced([100, 600, 600]), 500), undefined)
+})
+
+test('selectRange still folds a checkpoint together with real history', () => {
+  const session = fakeSession([system(1), checkpoint(2), user(3), user(4)])
+  assert.deepEqual(selectRange(session, priced([100, 600, 600, 600]), 600), { start: 2, end: 3 })
+})
+
+test('selectRange refuses a fold that cannot cover its replacement', () => {
+  const session = fakeSession([system(1), user(2), user(3)])
+  const nodes = priced([100, 600, 600])
+  // A 600-token span against a 500-token checkpoint leaves nothing worth doing.
+  assert.equal(selectRange(session, nodes, 500, { summaryTokens: 500, minReclaimTokens: 500 }), undefined)
+  assert.deepEqual(selectRange(session, nodes, 500, { summaryTokens: 50, minReclaimTokens: 500 }), { start: 2, end: 2 })
+})
+
+test('retentionBudget keeps the configured tail until the gap needs more', () => {
+  const cap = 100_000
+  const retainTokens = 16_000
+  const surfaceTokens = 36_000
+  // The gap fits under the ceiling: the configured tail is kept.
+  assert.equal(retentionBudget({ cap, projected: cap, surfaceTokens, retainTokens }), retainTokens)
+  // The recorded pressure exceeds the whole surface, so nothing is protected
+  // beyond the floor.
+  assert.equal(retentionBudget({ cap, projected: 160_000, surfaceTokens, retainTokens }), 8000)
+  // In between, exactly the removable remainder is kept.
+  assert.equal(
+    retentionBudget({ cap, projected: 120_000, surfaceTokens, retainTokens, summaryTokens: 2000 }),
+    14_000,
+  )
+  // A ceiling below the floor still wins: the configured ratio is a real limit.
+  assert.equal(retentionBudget({ cap, projected: cap, surfaceTokens, retainTokens: 4000 }), 4000)
+})
+
+test('foldFloor scales with the trigger and never collapses to zero', () => {
+  assert.deepEqual(foldFloor(252_000), { summaryTokens: 5040, minReclaimTokens: 2520 })
+  assert.deepEqual(foldFloor(4000), { summaryTokens: 1024, minReclaimTokens: 1024 })
+  assert.deepEqual(foldFloor(0), { summaryTokens: 1024, minReclaimTokens: 1024 })
 })

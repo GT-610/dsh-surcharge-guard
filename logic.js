@@ -6,6 +6,9 @@ export const DEFAULTS = Object.freeze({
   maxAttempts: 2,
 })
 
+/** Verbatim tail kept even when the gap would allow folding deeper. */
+const MIN_TAIL_TOKENS = 8000
+
 /** Unwrap one live (volatile) config reference. */
 function liveValue(field, fallback) {
   if (field === undefined) return fallback
@@ -133,18 +136,77 @@ export function balanceCuts(session, nodes) {
   return cuts
 }
 
+/** True when a surface node is the replacement a previous fold wrote. */
+function isCheckpoint(session, seq) {
+  const event = session.eventAt(seq)
+  return event?.type === 'user/message' && event.data?.source?.kind === 'compact-checkpoint'
+}
+
+/**
+ * Recent-tail budget that leaves room to close the gap in one fold.
+ *
+ * A fold removes the nodes it shadows and adds the checkpoint that replaces
+ * them, so the reclaimable amount is the surface price minus the retained tail
+ * minus that checkpoint. A small gap keeps the configured ratio; a large one
+ * shrinks the tail down to the floor, because a tail that eats the gap is what
+ * makes a compaction "succeed" while the next request is still over the line.
+ *
+ * @param options.cap - the trigger line minus the safety margin.
+ * @param options.projected - priced prompt for the step being admitted.
+ * @param options.surfaceTokens - route-priced total of the current surface.
+ * @param options.retainTokens - configured ceiling for the verbatim tail.
+ * @param options.summaryTokens - price reserved for the replacement checkpoint.
+ * @param [options.minTailTokens] - floor for the verbatim tail.
+ * @returns the tail budget to select the range with.
+ */
+export function retentionBudget({
+  cap, projected, surfaceTokens, retainTokens, summaryTokens = 0, minTailTokens = MIN_TAIL_TOKENS,
+}) {
+  const needed = Math.max(0, projected - cap) + Math.max(0, summaryTokens)
+  const ceiling = Math.max(0, retainTokens)
+  // Never keep more than the surface itself, and never less than the floor
+  // unless the configured ceiling is below it.
+  const keepAtLeast = Math.min(ceiling, Math.max(0, minTailTokens))
+  const affordable = Math.max(0, surfaceTokens - needed)
+  return Math.min(ceiling, Math.max(keepAtLeast, affordable))
+}
+
+/**
+ * Prices that decide whether a fold is worth a model call at all.
+ *
+ * Both scale with the trigger so a small model is not held to a long-context
+ * floor. `summaryTokens` reserves what the replacement checkpoint will cost;
+ * `minReclaimTokens` is the smallest gain that justifies rewriting history.
+ *
+ * @param cap - the trigger line minus the safety margin.
+ * @returns the checkpoint allowance and the minimum net reclaim.
+ */
+export function foldFloor(cap) {
+  const scale = Number.isFinite(cap) && cap > 0 ? cap : 0
+  return {
+    summaryTokens: Math.min(8192, Math.max(1024, Math.round(scale * 0.02))),
+    minReclaimTokens: Math.max(1024, Math.round(scale * 0.01)),
+  }
+}
+
 /**
  * Choose the span to fold into one summary.
  *
  * Keeps a recent tail verbatim, then rewinds the cut to a tool-pairing
  * balanced position. A leading `system/message` is never inside the span.
  *
+ * A span made only of checkpoints is refused: it would rewrite the summary a
+ * previous fold just wrote, which costs a model call and cannot reclaim enough
+ * to matter. `floor` additionally refuses a span whose reclaim would not cover
+ * that rewrite.
+ *
  * @param session - session supplying the surface.
  * @param nodes - priced surface nodes in surface order.
  * @param retainTokens - minimum recent-tail budget retained verbatim.
- * @returns the inclusive span, or `undefined` when nothing safe is compactable.
+ * @param [floor] - `foldFloor(cap)` result; omitted means no minimum reclaim.
+ * @returns the inclusive span, or `undefined` when nothing is worth compacting.
  */
-export function selectRange(session, nodes, retainTokens) {
+export function selectRange(session, nodes, retainTokens, floor = {}) {
   const surface = session.surface.nodes
   if (nodes.length === 0 || nodes.length !== surface.length
     || nodes.some((node, index) => node.seq !== surface[index])) return undefined
@@ -165,5 +227,12 @@ export function selectRange(session, nodes, retainTokens) {
   while (keepFrom > firstIdx && cuts[keepFrom] !== true) keepFrom -= 1
   if (keepFrom <= firstIdx) return undefined
 
-  return { start: nodes[firstIdx].seq, end: nodes[keepFrom - 1].seq }
+  const span = nodes.slice(firstIdx, keepFrom)
+  // Only the checkpoints a previous fold wrote: rewriting them buys nothing.
+  if (span.every(node => isCheckpoint(session, node.seq))) return undefined
+  const reclaimable = span.reduce((total, node) => total + node.tokens, 0)
+    - Math.max(0, floor.summaryTokens ?? 0)
+  if (reclaimable < Math.max(0, floor.minReclaimTokens ?? 0)) return undefined
+
+  return { start: span[0].seq, end: span[span.length - 1].seq }
 }

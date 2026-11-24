@@ -12,17 +12,23 @@ const options = {
   maxAttempts: 2,
 }
 const user = tokens => ({ role: 'user', tokens })
+/** Default price of one surface node in the fake meter. */
+const NODE_TOKENS = 40000
 
 function fixture({ config = options, total = 900, previous, available = true, shrink = [400], error, root = false,
-  backend, isolated, llm } = {}) {
+  backend, isolated, llm, prices = {}, checkpoints = [] } = {}) {
   let hook
   let pressure = total
   const calls = { estimates: [], measures: [], compacts: [], warnings: [], logs: [], services: [], next: 0,
     isolated: [], provided: [], released: [] }
   const session = {
-    surface: { nodes: [0, 1, 2] },
+    // `replaceGeneration` advances whenever any middleware replaces the
+    // surface, which is how the guard tells that this step was already folded.
+    surface: { nodes: [0, 1, 2], replaceGeneration: 0 },
     requestHeader: () => previous,
-    eventAt: seq => ({ seq, type: seq === 0 ? 'system/message' : 'user/message' }),
+    eventAt: seq => (checkpoints.includes(seq)
+      ? { seq, type: 'user/message', data: { source: { kind: 'compact-checkpoint' } } }
+      : { seq, type: seq === 0 ? 'system/message' : 'user/message' }),
   }
   const agent = { session }
   const compaction = backend ?? {
@@ -98,7 +104,9 @@ function fixture({ config = options, total = 900, previous, available = true, sh
       estimateMessage(msg) { calls.estimates.push(msg); return msg.tokens },
       measure(owner, header) {
         calls.measures.push({ owner, header })
-        return { totalTokens: pressure, nodes: owner.surface.nodes.map(seq => ({ seq, tokens: 160 })) }
+        // Node prices match a real long transcript: a fold floor of a couple
+        // thousand tokens only makes sense against history this size.
+        return { totalTokens: pressure, nodes: owner.surface.nodes.map(seq => ({ seq, tokens: prices[seq] ?? NODE_TOKENS })) }
       },
     },
     logger: { info: text => calls.logs.push(text), warn: text => calls.warnings.push(text) },
@@ -149,19 +157,68 @@ test('uses the post-middleware surface and does not compact just below the trigg
   assert.equal(calls.services.length, 0)
 })
 
-test('rechecks after each summary, warns on residual surcharge, and preserves step admission', async () => {
-  const { step, calls } = fixture({ total: 1800, shrink: [1400, 1200] })
+test('folds once per step and reports a residual gap instead of chasing it', async () => {
+  // A second summary in the same step can only rewrite the checkpoint the
+  // first one wrote, so the guard stops after one transaction and measures the
+  // result: the step is admitted either way.
+  const { step, calls } = fixture({ total: 1800, shrink: [1400] })
   await step({ claimed: [user(10)] })
-  assert.equal(calls.compacts.length, 2)
-  assert.equal(calls.measures.length, 3)
-  assert.match(calls.warnings[0], /at or above the surcharge line.*1210.*surcharge line 1000/)
+  assert.equal(calls.compacts.length, 1)
+  assert.equal(calls.measures.length, 2, 'measured once before and once after the fold')
+  assert.match(calls.warnings[0], /at or above the surcharge line.*1410.*surcharge line 1000/)
 })
 
-test('a no-progress summary is not repeated in the same step', async () => {
+test('a no-progress fold is not retried in the same step', async () => {
   const { step, calls } = fixture({ total: 1200, shrink: [1200] })
   await step()
   assert.equal(calls.compacts.length, 1)
   assert.match(calls.warnings[0], /did not lower/)
+})
+
+test('does not fold a step another middleware already compacted', async () => {
+  const probe = fixture({ total: 1800 })
+  await probe.step({
+    // Native pressure compaction runs inside `next()` and replaces the
+    // surface; the guard must not add a second fold on top of it.
+    beforeDecision: setPressure => {
+      setPressure(1800)
+      probe.session.surface.replaceGeneration += 1
+    },
+  })
+  assert.equal(probe.calls.compacts.length, 0)
+  assert.equal(probe.calls.measures.length, 0)
+  assert.match(probe.calls.logs.join('\n'), /already folded history elsewhere/)
+})
+
+test('folds deeper than the retention ratio when the recorded gap exceeds the surface', async () => {
+  // Capped at 100,000 with a 16% tail ceiling of 16,000 over four 7,000-token
+  // nodes plus a 2,000-token system head.
+  const config = { ...options, rules: [{ ...route, surchargeAtTokens: 100100 }], safetyMarginTokens: 100, retainRatio: 0.16 }
+  const prices = { 0: 2000, 1: 7000, 2: 7000, 3: 7000, 4: 7000 }
+  const shallow = fixture({ config, prices, total: 101000 })
+  shallow.session.surface.nodes = [0, 1, 2, 3, 4]
+  await shallow.step()
+  // The gap fits under the ceiling, so only the tail-crossing node is folded.
+  assert.deepEqual(shallow.calls.compacts.map(call => [call.start, call.end]), [[1, 1]])
+
+  const deep = fixture({ config, prices, total: 160000 })
+  deep.session.surface.nodes = [0, 1, 2, 3, 4]
+  await deep.step()
+  // The recorded pressure is far above the surface price, so the tail is cut
+  // down to its floor and the fold reaches two more nodes.
+  assert.deepEqual(deep.calls.compacts.map(call => [call.start, call.end]), [[1, 2]])
+})
+
+test('refuses to fold the checkpoint a previous fold wrote', async () => {
+  const probe = fixture({
+    config: { ...options, rules: [{ ...route, surchargeAtTokens: 1100 }], safetyMarginTokens: 100, retainRatio: 0.15 },
+    total: 1000,
+    prices: { 0: 2000, 1: 30000, 2: 50000 },
+    checkpoints: [1],
+  })
+  await probe.step()
+  assert.equal(probe.calls.compacts.length, 0, 'a summary of a summary is not worth a model call')
+  assert.match(probe.calls.warnings[0], /no safe history range worth folding/)
 })
 
 test('failed summary consumes the turn budget; surface growth does not reset it', async () => {
@@ -279,19 +336,20 @@ test('a routed rule compacts through its own isolated Basic backend', async () =
   assert.equal(probe.calls.disposed.length, 1, 'the temporary backend is always disposed')
 })
 
-test('repeated summaries in one step reuse no realm and never leak it', async () => {
+test('one transaction per step opens and disposes exactly one realm', async () => {
   const calls = { compacts: [] }
   const { backend } = basicBackend(calls)
   const probe = fixture({
     backend,
     total: 1800,
-    shrink: [1400, 1200],
+    shrink: [1400],
     config: { ...options, rules: [{ ...route, surchargeAtTokens: 1000, summaryTarget }] },
   })
   await probe.step()
-  assert.equal(probe.calls.isolated.length, 2)
-  assert.notEqual(probe.calls.isolated[0].realm, probe.calls.isolated[1].realm)
-  assert.equal(new Set(probe.calls.disposed).size, 2, 'each transaction owned a distinct realm')
+  assert.equal(probe.calls.isolated.length, 1)
+  assert.equal(probe.calls.disposed.length, 1, 'the transaction owned one realm')
+  assert.equal(probe.calls.compacts.length, 1, 'the isolated backend summarized once')
+  assert.equal(calls.compacts.length, 0, 'the session backend was untouched')
 })
 
 test('a failed routed summary warns, disposes, and does not fall back', async () => {

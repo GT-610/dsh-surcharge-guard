@@ -15,13 +15,20 @@ After enabling the plugin, open **Plugins → Surcharge guard**:
 | Goal | Action |
 |---|---|
 | Compact earlier | Raise the safety margin; this may spend more on summaries |
-| Keep more recent history | Raise the retain ratio within `0.01–0.9` |
-| Limit compaction attempts per turn | Set the summary attempt limit, default `2`; `0` disables guard compaction |
+| Keep more recent history | Raise the retain ratio within `0.01–0.9`; it is a ceiling, and a large gap folds deeper |
+| Limit compaction attempts per turn | Set the summary attempt limit, default `2`; `0` disables guard compaction, and one step folds at most once |
 | Write summaries with a cheaper model | Pick a provider and model under the rule's **Summary model**; choose **Use existing summary settings** to restore the default |
 | Spend less on summary reasoning | After choosing a summary model, pick one of its **Summary reasoning effort** levels; **Use the model default** overrides nothing |
 | Pause protection without removing rules | Turn the master switch off |
 
 Thresholds and margins accept values such as `272000`, `272K`, and `1.05M`. Changes apply to subsequent steps without restarting the plugin.
+
+## How one fold is chosen
+
+- **One fold per step.** A second fold in the same step can only re-summarize the checkpoint the first one wrote: it buys almost nothing and pays for another model call. A residual gap is reported instead.
+- **Depth follows the gap.** The retain ratio is a ceiling for the verbatim tail, not a fixed budget. When the recorded pressure sits far above the trigger and the tail would keep everything worth folding, the tail shrinks toward its floor so one fold can actually land under the line.
+- **No summary of a summary.** A candidate span that holds nothing but the checkpoints earlier folds wrote, or whose reclaim cannot cover the replacement, is not compacted at all.
+- **No duplicate fold with native compaction.** If another middleware already replaced this step's surface, the guard does not add a second transaction.
 
 The summary model is used only for compaction triggered by that rule. The chat model, manual compaction, and DSH's own compaction policy keep their settings. If you choose another provider, it receives the selected history and the prompts and tool definitions in that summary request.
 
@@ -32,7 +39,7 @@ If the route cannot serve the chosen level at run time, the guard logs a warning
 ## Limitations
 
 - This is **best-effort protection, not a billing cap**. The guard estimates committed history and messages admitted for the step. Later prompt updates, tool definitions, attachment pricing, retries, and provider counts can differ.
-- If there is no safe range, summarization fails, or the estimate remains above the line, the original request is not blocked. The session's DSH backend runs compaction, and its summary request may incur charges. The guard's attempt limit does not cap DSH's built-in compaction or internal backend retries.
+- If there is no safe range, summarization fails, or the estimate remains above the line, the original request is not blocked. The session's DSH backend runs compaction, and its summary request may incur charges. The guard's attempt limit does not cap DSH's built-in compaction or internal backend retries, and it never folds the same step twice.
 - A custom summary model needs DSH's Basic compaction backend and enough context capacity. Switching models usually cannot reuse the chat model's prefix cache, so the summary itself may be slower or cost more. If the selected route fails, the guard logs a warning and continues the step without falling back to the original route, and that step can still cross the line.
 - A summary reasoning effort applies only to the chosen summary model; DSH's own summary settings, manual compaction, and the chat route keep theirs. Effort names are provider-defined, so the same name need not mean the same thinking budget across models.
 - Raising the effort spends part of the summary's output cap rather than a separate allowance. Basic's `maxTokens` covers provider-counted reasoning tokens, and a `max-tokens` finish is treated as a truncated, incomplete checkpoint. The guard inherits that cap from the guarded model's policy, so a small cap combined with a high effort can spend the whole budget on thinking and never finish the summary: that compaction fails, the step continues uncompacted, and the attempt is still spent. The failure reports `truncated at the token cap` rather than blaming the level, and validation cannot catch it because the level is supported — there is simply not enough room left to emit it. Leaving the cap comfortably above the effort's thinking budget avoids it, and the default headroom usually does.

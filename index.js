@@ -1,6 +1,6 @@
 /** Host-side, best-effort surcharge protection for model requests. */
 import z from '@deepseek-ai/schemastery'
-import { DEFAULTS, normalizeConfig, ruleFor, selectRange } from './logic.js'
+import { DEFAULTS, foldFloor, normalizeConfig, retentionBudget, ruleFor, selectRange } from './logic.js'
 
 function compactionFor(ctx, agent) {
   // Web presets own an isolated backend; a standalone profile may own it at root.
@@ -152,7 +152,7 @@ function projectedHeader(session, selection) {
   }
 }
 
-async function enforce(ctx, config, { agent, signal, modelSelection }, messages, budget) {
+async function enforce(ctx, config, { agent, signal, modelSelection }, messages, budget, generation) {
   const selection = modelSelection ?? agent.model?.current()
   if (selection === undefined) return
   const rule = ruleFor(config, selection)
@@ -165,6 +165,17 @@ async function enforce(ctx, config, { agent, signal, modelSelection }, messages,
   const line = rule.surchargeAtTokens
   const cap = Math.max(1, line - config.safetyMarginTokens)
   const scope = `surcharge guard (${rule.provider}/${rule.model})`
+  // Native compaction and any other pre-step middleware have already run by
+  // the time this executes. A surface they replaced in this same step is a
+  // compaction the guard must not repeat: a second summary in one step is the
+  // double fold this plugin exists to avoid, and it can only rewrite the
+  // checkpoint the first one wrote.
+  const surface = session.surface
+  if (generation !== undefined && surface?.replaceGeneration !== undefined
+    && surface.replaceGeneration !== generation) {
+    ctx.logger.info(`${scope}: skipped; this step already folded history elsewhere`)
+    return
+  }
   const measure = () => meter.measure(session, header)
   let measurement = measure()
   let projected = measurement.totalTokens + pendingTokens
@@ -197,27 +208,38 @@ async function enforce(ctx, config, { agent, signal, modelSelection }, messages,
   }
   if (signal.aborted) return
 
-  while (projected >= cap && budget.used < config.maxAttempts && !signal.aborted) {
-    const range = selectRange(session, measurement.nodes, Math.floor(cap * config.retainRatio))
-    if (range === undefined) {
-      warn('no safe history range to compact')
-      return
-    }
-    const before = projected
-    budget.used += 1
-    const result = rule.summaryTarget === undefined
-      ? await compaction.compactRegion(range.start, range.end, agent, signal)
-      : await compactWithSummaryTarget(ctx, compaction, rule, range, agent, signal, bound)
-    if (signal.aborted) return
-    measurement = measure()
-    projected = measurement.totalTokens + pendingTokens
-    ctx.logger.info(`${scope}: folded ${result.shadowedSeqs.length} nodes; estimated ${before} → ${projected} prompt tokens`)
-    if (projected >= before) {
-      warn('compaction did not lower the estimated pressure')
-      return
-    }
+  // Depth follows the gap: a tail that keeps the configured ratio cannot close
+  // a large gap, and chasing the remainder in a second fold only rewrites the
+  // checkpoint the first one wrote.
+  const floor = foldFloor(cap)
+  const surfaceTokens = measurement.surfaceTokens
+    ?? measurement.nodes.reduce((total, node) => total + node.tokens, 0)
+  const retain = retentionBudget({
+    cap,
+    projected,
+    surfaceTokens,
+    retainTokens: Math.floor(cap * config.retainRatio),
+    summaryTokens: floor.summaryTokens,
+  })
+  const range = selectRange(session, measurement.nodes, retain, floor)
+  if (range === undefined) {
+    warn('no safe history range worth folding')
+    return
   }
-  if (!signal.aborted && projected >= cap) {
+  const before = projected
+  budget.used += 1
+  const result = rule.summaryTarget === undefined
+    ? await compaction.compactRegion(range.start, range.end, agent, signal)
+    : await compactWithSummaryTarget(ctx, compaction, rule, range, agent, signal, bound)
+  if (signal.aborted) return
+  measurement = measure()
+  projected = measurement.totalTokens + pendingTokens
+  ctx.logger.info(`${scope}: folded ${result.shadowedSeqs.length} nodes; estimated ${before} → ${projected} prompt tokens`)
+  if (projected >= before) {
+    warn('compaction did not lower the estimated pressure')
+    return
+  }
+  if (projected >= cap) {
     warn(projected >= line ? 'still at or above the surcharge line' : 'still within the safety margin')
   }
 }
@@ -251,6 +273,8 @@ export function apply(ctx, rawConfig) {
   ctx.on('agent/pre-step', async (event, next) => {
     // Let native compaction and other downstream middleware run first, then
     // price the messages the step will admit (not just the original inbox).
+    // Their surface replacement is recorded so this step is not compacted twice.
+    const generation = event.agent.session.surface?.replaceGeneration
     const decision = await next()
     const { agent, signal, turn } = event
     if (decision.kind !== 'enter' || signal.aborted) return decision
@@ -262,7 +286,7 @@ export function apply(ctx, rawConfig) {
         budget = { turn, used: 0 }
         attempts.set(agent.session, budget)
       }
-      await enforce(ctx, config, event, decision.messages, budget)
+      await enforce(ctx, config, event, decision.messages, budget, generation)
     } catch (error) {
       if (!signal.aborted) {
         ctx.logger.warn(`surcharge guard: ${error instanceof Error ? error.message : String(error)}; continuing the step`)
