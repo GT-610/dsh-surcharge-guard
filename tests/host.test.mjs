@@ -247,6 +247,21 @@ test('no safe range does not spend the turn budget; absent compaction warns and 
   assert.match(missing.calls.warnings[0], /no compaction service/)
 })
 
+test('a refusal warns once per turn instead of on every step', async () => {
+  // Refusals deliberately do not spend the attempt budget, so a persistent
+  // phantom pressure would otherwise log the same line for every step.
+  const probe = fixture({ config: { ...options, maxAttempts: 1 } })
+  probe.session.surface.nodes = [0, 1]
+  await probe.step()
+  await probe.step()
+  assert.equal(probe.calls.warnings.length, 1)
+  assert.match(probe.calls.warnings[0], /no safe history range worth folding/)
+  // A new turn re-checks and reports again.
+  await probe.step({ turn: 2 })
+  assert.equal(probe.calls.warnings.length, 2)
+  assert.equal(probe.calls.compacts.length, 0, 'a refusal never spends the attempt budget')
+})
+
 test('disabled, zero-budget, rejected and aborted steps never measure or summarize', async () => {
   const abort = new AbortController()
   abort.abort()

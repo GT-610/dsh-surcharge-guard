@@ -223,7 +223,13 @@ async function enforce(ctx, config, { agent, signal, modelSelection }, messages,
   })
   const range = selectRange(session, measurement.nodes, retain, floor)
   if (range === undefined) {
-    warn('no safe history range worth folding')
+    // A refusal costs no attempt, so a phantom pressure would otherwise repeat
+    // this line on every step of the turn. The surface it judged is unchanged
+    // between them, so one report per turn is enough; the next turn re-checks.
+    if (budget.refused !== true) {
+      budget.refused = true
+      warn('no safe history range worth folding')
+    }
     return
   }
   const before = projected
@@ -283,7 +289,7 @@ export function apply(ctx, rawConfig) {
       if (!config.enabled || config.rules.length === 0 || config.maxAttempts === 0) return decision
       let budget = attempts.get(agent.session)
       if (budget === undefined || budget.turn !== turn) {
-        budget = { turn, used: 0 }
+        budget = { turn, used: 0, refused: false }
         attempts.set(agent.session, budget)
       }
       await enforce(ctx, config, event, decision.messages, budget, generation)

@@ -5,6 +5,8 @@
 - Stop folding the same step twice. The guard now runs one transaction per step and reports a residual gap instead of chasing it, because a second fold can only re-summarize the checkpoint the first one wrote. It also leaves a step alone when another middleware already replaced the surface: native pressure compaction runs in the same pre-step chain, so the guard was stacking a second summary on top of it.
 - Choose the verbatim tail from the gap instead of a fixed fraction of the trigger. `retentionBudget` narrows the tail toward its floor when the recorded pressure sits far above the trigger, so one fold can land under the line; `foldFloor` prices the replacement checkpoint and the minimum reclaim that makes a fold worth a model call.
 - Refuse folds that cannot pay for themselves: a span holding nothing but earlier checkpoints, or one whose reclaim does not cover its replacement, is now refused and reported rather than summarized. This is the "one record, ~2812 tokens" second row in the transcript.
+- Report a refused fold once per turn. A refusal deliberately spends no attempt, so a persistent
+  phantom pressure used to repeat the same warning on every step of the turn.
 - Document the mechanism in [`docs/compact-twice-investigation.md`](docs/compact-twice-investigation.md): provider-usage pressure against heuristic thresholds, the tail that hides the foldable prefix, and the retry that rewrote the checkpoint.
 
 - Document that raising a summary reasoning effort spends the summary's output cap, not a separate allowance, and that a small `maxTokens` plus a high effort fails as a truncated checkpoint rather than an unsupported level. No behaviour changes; the failure path is the backend's, and the guard's pre-flight cannot see it.
