@@ -28,6 +28,9 @@ window.__ModuleLoader__.load({
       "off": "已停用",
       "cap": "到线前触发于",
       "remove": "移除",
+      "enableAll": "全部启用",
+      "disableAll": "全部停用",
+      "rulesSummary": "已启用 {on}/{total}",
       "addTitle": "一键添加",
       "addHint": "按模型家族预填建议阈值。新增规则默认停用，请按具体服务商的定价核对后再启用。",
       "addFamily": "预填 {family} 规则",
@@ -86,6 +89,9 @@ window.__ModuleLoader__.load({
       "off": "Off",
       "cap": "Triggers at",
       "remove": "Remove",
+      "enableAll": "Enable all",
+      "disableAll": "Disable all",
+      "rulesSummary": "{on}/{total} enabled",
       "addTitle": "Quick add",
       "addHint": "Prefill suggested family thresholds. New rules are off until you confirm the price for the specific provider and enable them.",
       "addFamily": "Prefill {family} rules",
@@ -261,6 +267,19 @@ window.__ModuleLoader__.load({
         borderRadius: '8px',
       },
       actions: { display: 'flex', flexWrap: 'wrap', gap: '8px', alignItems: 'center' },
+      badge: { display: 'inline-flex', alignItems: 'center', gap: '6px', whiteSpace: 'nowrap' },
+      off: { opacity: 0.5 },
+    }
+
+    /** A colored dot so the rule's state reads before the label does. */
+    function statusDot(on) {
+      return {
+        flex: '0 0 auto',
+        width: '7px',
+        height: '7px',
+        borderRadius: '50%',
+        background: on ? 'var(--dsw-alias-brand-primary)' : 'var(--dsw-alias-border-l2)',
+      }
     }
 
     /** One labeled field row. */
@@ -511,6 +530,8 @@ window.__ModuleLoader__.load({
       const [draft, setDraft] = React.useState({ provider: '', model: '', threshold: '' })
       const rows = React.useMemo(() => mergeCatalog(declared.value?.providers, catalog), [declared.value, catalog])
       const rules = snapshot.value?.rules ?? []
+      const onCount = rules.filter(entry => entry.enabled !== false).length
+      const allOn = rules.length > 0 && onCount === rules.length
       const enabled = snapshot.value?.enabled !== false
       const margin = snapshot.value?.safetyMarginTokens ?? 20000
       const retain = snapshot.value?.retainRatio ?? 0.16
@@ -617,7 +638,15 @@ window.__ModuleLoader__.load({
         h('div', { style: styles.group },
           h('div', { style: styles.actions },
             h('h4', { style: styles.groupTitle }, t('rules')),
+            rules.length === 0 ? null : h('span', { style: styles.intro },
+              t('rulesSummary').replace('{on}', String(onCount)).replace('{total}', String(rules.length))),
             h('span', { role: 'status', style: styles.intro }, writeStatus === null ? null : t(writeStatus)),
+            // One switch for the whole list: the common case is enabling the
+            // rules just prefilled, or silencing all of them at once.
+            rules.length === 0 ? null : h('button', {
+              type: 'button', disabled, style: styles.button,
+              onClick: () => write('rules', rules.map(entry => ({ ...entry, enabled: !allOn }))),
+            }, t(allOn ? 'disableAll' : 'enableAll')),
           ),
           rules.length === 0 ? h('p', { style: styles.empty }, t('rulesEmpty')) :
             h('table', { style: styles.table },
@@ -632,9 +661,9 @@ window.__ModuleLoader__.load({
                   row?.dormant ? t('dormant') : null,
                 ].filter(Boolean)
                 return h('tr', { key },
-                  h('td', { style: { ...styles.td, ...styles.mono } }, rule.provider),
+                  h('td', { style: { ...styles.td, ...styles.mono } }, h('span', { style: state ? null : styles.off }, rule.provider)),
                   h('td', { style: styles.td },
-                    rule.model,
+                    h('span', { style: state ? null : styles.off }, rule.model),
                     details.length ? h('div', { style: styles.hint }, details.join(' · ')) : null,
                     h(SummaryModelSelect, {
                       t, rule, candidates: summaryCandidates, disabled,
@@ -655,13 +684,23 @@ window.__ModuleLoader__.load({
                     onCommit: surchargeAtTokens => editRule(key, { surchargeAtTokens }, 'thresholdSaved'),
                   })),
                   h('td', { style: styles.td }, formatTokens(Math.max(1, rule.surchargeAtTokens - margin))),
-                  h('td', { style: styles.td }, t(state ? 'on' : 'off')),
+                  // State lives with the switch that changes it: a label in one
+                  // column and a button in another made "on" and "off" easy to mix up.
                   h('td', { style: styles.td }, h('div', { style: styles.actions },
-                    h('button', { type: 'button', disabled, style: styles.button,
-                      onClick: () => editRule(key, { enabled: !state }) }, t(state ? 'disableRule' : 'enableRule')),
-                    h('button', { type: 'button', disabled, style: { ...styles.button, ...styles.danger },
-                      onClick: () => write('rules', rules.filter(entry => ruleKey(entry) !== key)) }, t('remove')),
+                    h('span', { style: styles.badge },
+                      h('span', { 'aria-hidden': true, style: statusDot(state) }),
+                      t(state ? 'on' : 'off')),
+                    h(Toggle, {
+                      // The name states the action this switch performs, so the
+                      // state is never ambiguous to a reader that cannot see it.
+                      label: `${t(state ? 'disableRule' : 'enableRule')} ${rule.provider}/${rule.model}`,
+                      checked: state, disabled,
+                      onChange: next => editRule(key, { enabled: next }),
+                    }),
                   )),
+                  h('td', { style: styles.td }, h('button', { type: 'button', disabled,
+                    style: { ...styles.button, ...styles.danger },
+                    onClick: () => write('rules', rules.filter(entry => ruleKey(entry) !== key)) }, t('remove'))),
                 )
               })),
             ),

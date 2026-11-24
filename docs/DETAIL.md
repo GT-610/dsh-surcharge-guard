@@ -6,6 +6,8 @@ Some providers charge more for long prompts even when the request still fits the
 
 Open **Plugins → Surcharge guard**. Enter a rule manually, or prefill suggestions for matching GPT, Gemini, or Grok model IDs. New rules start off. Confirm the threshold against your provider's pricing before turning a rule on.
 
+Each rule's status column carries a switch and a state badge, and a disabled rule's provider and model are dimmed. The table header offers one **Enable all / Disable all** button plus an enabled count, so a prefilled batch can be turned on in one step.
+
 The guard starts checking at `max(1, surcharge threshold − safety margin)`. A larger margin triggers earlier. The retain ratio sets the largest recent-history budget, as a fraction of that trigger, and the guard keeps less when the gap demands a deeper fold. The summary attempt limit applies to the current turn; `0` disables guard compaction.
 
 ## What happens before a step

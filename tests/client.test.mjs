@@ -101,7 +101,18 @@ async function mount(t, { form = formStore(normal), page = false, bare, declared
   const button = label => root.root.findAllByType('button').find(node => node.children.join('') === label)
   const text = () => JSON.stringify(root.toJSON())
   const click = label => act(async () => { await button(label).props.onClick() })
-  return { root, input, button, text, click, form }
+  // Every rule now owns a switch next to its status badge, so switches are
+  // addressed by label instead of "the only one on the page".
+  const switchFor = label => root.root.findAllByProps({ role: 'switch' })
+    .find(node => node.props['aria-label'] === label)
+  const flip = label => act(async () => { switchFor(label).props.onClick() })
+  // A row switch is named by the action it performs, which flips with the rule.
+  const rowSwitch = entry => `${entry.enabled === false ? en.enableRule : en.disableRule} ${entry.provider}/${entry.model}`
+  // Rendered text only: a test instance JSON-stringifies into fiber cycles.
+  const cellText = node => (node.children ?? [])
+    .map(child => typeof child === 'string' ? child : cellText(child)).join('')
+  const rowStatus = index => cellText(root.root.findAllByType('tr')[index].findAllByType('td')[4])
+  return { root, input, button, switchFor, flip, rowSwitch, rowStatus, text, click, form }
 }
 
 const fieldLabel = `${en.colLine} ${rule.provider}/${rule.model}`
@@ -119,7 +130,7 @@ test('mounts the registered page with the owner form and writes using its revisi
   const ui = await mount(t, { page: true })
   assert.equal(ui.input(fieldLabel).props.value, '272K')
   assert.ok(ui.text().includes('252K'))
-  const toggle = () => ui.root.root.findByProps({ role: 'switch' })
+  const toggle = () => ui.switchFor(en.enabled)
   await firing(toggle, 'onClick')
   assert.deepEqual(ui.form.writes, [mutation('enabled', false)])
   assert.equal(toggle().props['aria-checked'], 'false')
@@ -151,13 +162,13 @@ test('explains a blocked Enable while the blurred threshold saves, then allows r
     const ui = await mount(t, { form })
     await editNumber(ui, fieldLabel, '300K')
     const status = () => ui.root.root.findByProps({ role: 'status' }).children.join('')
-    assert.equal(ui.button(en.enableRule).props.disabled, true)
+    assert.equal(ui.switchFor(ui.rowSwitch(off)).props.disabled, true)
     assert.equal(status(), en.saving)
     const updated = { ...off, surchargeAtTokens: 300000 }
     assert.deepEqual(form.writes, [mutation('rules', [updated])])
 
     await act(async () => { finish() })
-    assert.equal(ui.button(en.enableRule).props.disabled, false)
+    assert.equal(ui.switchFor(ui.rowSwitch(off)).props.disabled, false)
     if (refusal) {
       assert.equal(status(), '')
       assert.equal(ui.root.root.findByProps({ role: 'alert' }).children.join(''), en.saveFailed)
@@ -165,10 +176,11 @@ test('explains a blocked Enable while the blurred threshold saves, then allows r
     } else {
       assert.equal(status(), en.thresholdSaved)
       assert.deepEqual(form.getSnapshot().value.rules, [updated])
-      await ui.click(en.enableRule)
+      await ui.flip(ui.rowSwitch(updated))
       assert.deepEqual(form.writes[1], mutation('rules', [{ ...updated, enabled: true }], 11))
       assert.equal(status(), '')
-      assert.ok(ui.button(en.disableRule))
+      // The switch renames itself once the rule is on.
+      assert.equal(ui.switchFor(ui.rowSwitch({ ...updated, enabled: true })).props['aria-checked'], 'true')
     }
   }
 })
@@ -194,8 +206,23 @@ test('prefills only the missing family matches and leaves every new rule off', a
   assert.deepEqual(ui.form.writes, [mutation('rules', [rule, added])])
   const rows = ui.root.root.findAllByType('tr')
   assert.equal(rows.length, 3)
-  assert.equal(rows[2].findAllByType('td')[4].children.join(''), en.off)
+  assert.ok(ui.rowStatus(2).includes(en.off))
+  assert.equal(ui.switchFor(ui.rowSwitch(added)).props['aria-checked'], 'false')
   assert.equal(ui.button(familyLabel(0)).props.disabled, true)
+})
+
+test('turns every rule on or off from one switch and reports the enabled count', async t => {
+  const off = { ...rule, model: 'gpt-6-luna', enabled: false }
+  const form = formStore({ ...normal, rules: [rule, off] })
+  const ui = await mount(t, { form })
+  assert.ok(ui.text().includes(en.rulesSummary.replace('{on}', '1').replace('{total}', '2')))
+  // Not every rule is on, so the button offers to enable the rest.
+  await ui.click(en.enableAll)
+  assert.deepEqual(form.writes, [mutation('rules', [rule, { ...off, enabled: true }])])
+  assert.ok(ui.text().includes(en.rulesSummary.replace('{on}', '2').replace('{total}', '2')))
+  await ui.click(en.disableAll)
+  // The second click reads the store's accepted value, so both rules turn off.
+  assert.deepEqual(form.writes[1], mutation('rules', [{ ...rule, enabled: false }, { ...off, enabled: false }], 11))
 })
 
 test('allows a hand-entered rule without a catalog, rejects duplicates, and renders later toggles', async t => {
@@ -213,9 +240,9 @@ test('allows a hand-entered rule without a catalog, rejects duplicates, and rend
   await enter()
   assert.ok(ui.text().includes(en.duplicateRule))
   assert.equal(ui.form.writes.length, 1)
-  await ui.click(en.enableRule)
+  await ui.flip(ui.rowSwitch(newRule))
   assert.deepEqual(ui.form.writes[1], mutation('rules', [{ ...newRule, enabled: true }], 11))
-  assert.equal(ui.root.root.findAllByType('tr')[1].findAllByType('td')[4].children.join(''), en.on)
+  assert.ok(ui.rowStatus(1).includes(en.on))
   await ui.click(en.remove)
   assert.deepEqual(ui.form.writes[2], mutation('rules', [], 12))
   assert.ok(ui.text().includes(en.rulesEmpty))
@@ -243,7 +270,7 @@ test('merges live and late-loaded declarations without duplicate rules or false 
   await ui.click(familyLabel(2))
   const rows = ui.root.root.findAllByType('tr')
   assert.equal(rows.length, 4)
-  assert.match(JSON.stringify(rows[3].findAllByType('td')[1].children[0]), /gpt-dormant/)
+  assert.match(ui.root.root.findAllByType('tr')[3].findAllByType('td')[1].children[0].children[0], /gpt-dormant/)
   assert.ok(ui.text().includes(en.dormant))
 })
 
@@ -263,7 +290,7 @@ test('falls back to a directly inserted row and follows live store publications'
   const ui = await mount(t, { bare })
   assert.ok(ui.text().includes(en.rulesEmpty))
   await act(async () => bare.publish({ value: normal, revision: 20 }))
-  await ui.click(en.disableRule)
+  await ui.flip(ui.rowSwitch(rule))
   assert.deepEqual(bare.writes, [mutation('rules', [{ ...rule, enabled: false }], 20)])
   const unavailable = await mount(t, { unavailable: true })
   assert.ok(unavailable.text().includes(en.notWritable))
@@ -272,9 +299,10 @@ test('falls back to a directly inserted row and follows live store publications'
 test('surfaces refused and thrown writes without painting an unaccepted change', async t => {
   for (const args of [{ refusal: true }, { error: Error('transport offline') }]) {
     const ui = await mount(t, { form: formStore(normal, args) })
-    await ui.click(en.disableRule)
+    await ui.flip(ui.rowSwitch(rule))
     assert.match(ui.text(), args.error ? /Save failed: transport offline/ : /Save failed/)
-    assert.ok(ui.button(en.disableRule))
+    // The rejected write left the rule on, so its switch still reads checked.
+    assert.equal(ui.switchFor(ui.rowSwitch(rule)).props['aria-checked'], 'true')
   }
 })
 

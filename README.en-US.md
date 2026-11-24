@@ -11,6 +11,7 @@ After enabling the plugin, open **Plugins → Surcharge guard**:
 1. Use “Prefill GPT rules”, “Prefill Gemini rules”, or another family button to add suggestions, or enter the provider and model IDs manually. New rules start off.
 2. Check the specific provider's pricing, correct the surcharge threshold, then enable each rule. Prefills are not verified provider rates.
 3. Keep the master switch on. “Triggers at” shows the surcharge threshold minus the safety margin, with a minimum of one token.
+4. New rules start off: the status column is a switch in the off position next to an **Off** badge. Turn rules on one at a time, or use **Enable all / Disable all** above the table; the header shows how many rules are on.
 
 | Goal | Action |
 |---|---|
