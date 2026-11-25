@@ -80,14 +80,27 @@ summary is not smaller than the shadowed content (2358 estimated framed tokens >
 
 计费侧本身没问题：OpenAI 的 long-context 档是「>272K input tokens 时**整个请求**按 2× input / 1.5× output 计」，所以按 provider 报数守线是对的 —— 问题在于这条路由的报数和历史不自洽，压缩治不了它。
 
-## 5. 插件能怎么修（按价值排序）
+## 5. 修法
 
-1. **一步只压一次，且不与原生重复。** `enforce` 里先记 `session.surface.replaceGeneration`，`await next()` 之后若 generation 前进（原生刚压过），本步直接跳过；并把 `maxAttempts` 降为"每步 1、每轮 2"的上限。
-2. **按缺口选深度，而不是固定 16%。** `needed = projected − cap + slack`，`retain = clamp(surfaceTokens − needed, minTail, cap × retainRatio)`，一刀切到线下；`minTail` 可用绝对 token（如 8K–20K）而不是比例。
-3. **不许压新 checkpoint、要最小净收益。** 选区里若每个节点都是 `source.kind === 'compact-checkpoint'`，或估算净收益 < `max(1K, cap × 1%)`，返回 `undefined` 并记一次警告，不再重试。
-4. **用量一致性闸门 + 跨步冷却。** `baseline.kind === 'usage'` 且 `usage > k × (surfaceTokens + 工具估值)`（k 默认 1.5）时，按估值判定并在会话内警告一次"该路由上报与历史不符"；一次压缩后仍未回到线下，则按"估值表层增长量"冷却（例如再长 5% 或 20K 才允许下一次），把"每步都压"变成"每次增长压一次"。
+1–3 已随本 PR 实现，4 仍是草案。
 
-前两条就能消掉截图里的现象；后两条决定它会不会在下一轮又冒出来。
+### 已实现
+
+1. **一步只压一次，且不与原生重复。**
+   `apply` 的 `agent/pre-step` 处理器在 `await next()` **之前**读 `session.surface.replaceGeneration`，作为 `generation` 传给 `enforce`；`enforce` 在 `next()` 之后比较，前进即说明本步已被别的中间件压过，直接返回。
+   折叠次数由"每次进入 `enforce` 只做一次事务"决定；`maxAttempts`（默认 2）仍按轮计，用来兜住同一轮跨步骤的重复尝试。
+2. **按缺口选深度，而不是固定 16%。**
+   `needed = max(0, projected − cap) + summaryTokens`；
+   `retain = min(floor(cap × retainRatio), max(keepAtLeast, surfaceTokens − needed))`，
+   其中 `keepAtLeast = min(floor(cap × retainRatio), MIN_TAIL_TOKENS)`。`MIN_TAIL_TOKENS = 8000` 目前是代码里的常量，不可配置；把它做成设置项是后续建议。
+3. **不许压新 checkpoint、要最小净收益。**
+   候选范围里每个节点都是 `compact-checkpoint` 时返回 `undefined`；`span − summaryTokens < minReclaim` 时同样返回 `undefined`。其中 `summaryTokens = clamp(cap × 2%, 1024, 8192)`、`minReclaim = max(1024, cap × 1%)`。拒绝不消耗尝试额度，并且每轮只记一条警告。
+
+### 草案（尚未实现）
+
+4. **用量一致性闸门 + 跨步冷却。** `baseline.kind === 'usage'` 且 `usage > k × (surfaceTokens + 工具估值)`（k 默认 1.5）时按估值判定，并在会话内警告一次"该路由上报与历史不符"；一次压缩后仍未回到线下，则按"估值表层增长量"冷却（例如再长 5% 或 20K 才允许下一次），把"每步都压"变成"每次增长压一次"。
+
+已实现的三条消掉了截图里的现象；第 4 条决定它会不会在下一轮以别的形式冒出来。
 
 ## 6. 立即止血（不改代码）
 
