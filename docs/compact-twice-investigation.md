@@ -50,13 +50,15 @@
 
 压完之后 surface 形如 `[system, checkpoint, 若干小节点, 一个很大的工具结果]`。`selectRange()` 从尾部累加到 `retain = 40,320` 就停；只要最后那个节点单独就 ≥ 40,320，切点被钉在它前面，于是可压范围 `= [firstIdx, 该节点前一个]`。
 
-用本仓库的纯函数复现（`system(26000) / checkpoint(2812) / call(300) / result(41000)`，retain 40,320）：
+修复前，用本仓库的纯函数按同样的表层即可复现这一次折叠（`system(26000) / checkpoint(2812) / call(300) / result(41000)`，`retain = 40,320`）：
 
 ```js
-selectRange(session, nodes, 40320)  // → { start: 2, end: 2 }，只含 checkpoint 2812 tok
+selectRange(session, nodes, 40320)
+// 修复前 → { start: 2, end: 2 }，只含 checkpoint 的 2,812 tok
+// 现在   → undefined：这个范围只含 checkpoint，按新规则直接拒绝
 ```
 
-这正是截图第二行的「已压缩 1 条历史记录（约 2812 tokens）」。
+这正是截图第二行的「已压缩 1 条历史记录（约 2812 tokens）」；现在同一次调用不再产生折叠。
 
 同一个会话里，`compaction/summary` 53 次、`compaction/end(error)` 26 次，失败几乎全是：
 
@@ -104,6 +106,7 @@ summary is not smaller than the shadowed content (2358 estimated framed tokens >
 
 ## 6. 立即止血（不改代码）
 
-- 本插件：`maxAttempts: 1`；`safetyMarginTokens` 不要低于幻影压力与 272K 之间的空隙（当前 ~260K，余量 20K 的 cap 是 252K，正好被压住 → 可把余量降到 8K–12K 或把阈值调到 280K 让它退出触发区）。
+- 本插件：`maxAttempts: 1`。触发线是 `cap = 阈值 − 余量`，而压力必须**严格低于** cap 才不会触发；幻影压力约 260K 时，只有余量 **小于** 272K 与压力之差（约 12K）才能退出触发区，例如余量 8K → cap 264K。反过来把余量加大只会把 cap 压得更低、压得更勤。
+- 不要为了退出触发区去改配置里的加价阈值：插件用同一个值判断"越线警告"，把它调到 280K 之后，压力 275K 时既不会压缩也不会告警，而实际已经按 2× 计费。要调就调余量，阈值保持服务商的真实计费线。
 - 原生：`compaction-basic` 行加 `compactionRetries: 0` 与绝对 `retainTokens`，避免它自己连压两次。
 - 根治仍在上游：`measure()` 的 usage 采信需要一致性钳制，`selectCompactableRange()` 需要"只含新 checkpoint 就返回 null"的守卫。
