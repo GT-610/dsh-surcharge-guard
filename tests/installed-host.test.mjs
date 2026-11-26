@@ -311,10 +311,9 @@ test('installed DSH: the hard line rejects the step instead of dispatching', { s
 test('installed DSH: the dispatch gate blocks an over-line request on the real waterfall', { skip: !useInstalled }, async () => {
   const history = Array.from({ length: 3 }, () => 'history content '.repeat(2500))
   const usage = { inputTokens: 70_000, outputTokens: 100, totalTokens: 70_100 }
-  const { ctx, session, route, agent, signal, streams, user, agentEvents, ...rest } = await run({
+  const { ctx, session, route, agent, signal, streams, user, agentEvents } = await run({
     anchor: { history, usage },
   })
-  void rest
   const fiber = ctx.plugin({ apply: guard.apply, Config: guard.Config, inject: guard.inject }, {
     rules: [{ ...route, surchargeAtTokens: 100_000 }],
     safetyMarginTokens: 20_000,

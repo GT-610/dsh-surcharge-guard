@@ -7,6 +7,8 @@
   "intro": "按服务商和模型设置长上下文加价阈值。插件会在请求前估算用量并压缩历史；到线时会拦住请求，但估算本身仍可能偏低。",
   "enabled": "启用计费保护",
   "enabledHint": "关闭后所有规则停止生效，已有配置保留。",
+  "enforceLine": "硬红线",
+  "enforceLineHint": "估算已到加价线时，先剪工具结果、再强制深折；仍然压不下去就拦住这一步，不再发出可能双倍计费的请求。",
   "margin": "安全余量",
   "marginHint": "在加价线以下多少 token 触发压缩。余量越大，触发越早。",
   "retain": "保留比例",
@@ -61,7 +63,5 @@
   "summaryEffort": "摘要推理等级",
   "summaryEffortDefault": "沿用模型默认",
   "summaryEffortUnknown": "实时目录未列出这个摘要模型的推理等级，只能沿用模型默认。",
-  "summaryProviderNotice": "待压缩的历史和本次摘要请求的提示、工具定义会发送至 {provider}。主对话模型不变。",
-  "enforceLine": "硬红线",
-  "enforceLineHint": "估算已到加价线时，先剪工具结果、再强制深折；仍然压不下去就拦住这一步，不再发出可能双倍计费的请求。"
+  "summaryProviderNotice": "待压缩的历史和本次摘要请求的提示、工具定义会发送至 {provider}。主对话模型不变。"
 }

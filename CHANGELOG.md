@@ -18,16 +18,14 @@
   to be a per-turn counter that only advanced, so two failed (or two successful but later
   outgrown) folds silenced the guard for the rest of a long turn: a real session sat at 320K for
   six requests against a 272K–20K rule. Failures now count toward the limit, a helpful fold
-  clears it, and above the surcharge line a spent budget still retries once the pressure has
-  grown since the last attempt, because that request pays the surcharge anyway.
+  clears it. The hard line has its own forced fold, so a spent budget never disables protection.
 - Calibrate the estimate against the provider's own count. `tokenMeter.measure()` reports the last
   provider count plus new content at four characters per token, so the safety margin was being
   spent by content the provider prices two to three times higher. The guard now reconstructs the
   heuristic price of the anchored history (`surfaceTokens − surfaceDeltaTokens`) and scales the
   surface delta and admitted messages by the observed provider/heuristic ratio, per route and per
   session. A larger observation applies immediately and a smaller one releases slowly.
-- Report a spent budget once between attempts instead of on every step, and log the emergency
-  retry above the surcharge line.
+- Report a spent budget once between attempts instead of on every step.
 - Start new rules enabled, from both the family prefill and the manual form. A rule the user just
   configured should be in force; the prefilled threshold is documented as a suggestion to check, and
   a row can still be switched off or silenced with **Disable all**.

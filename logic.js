@@ -22,9 +22,6 @@ export const CALIBRATION = Object.freeze({
   min: 1,
   max: 8,
   release: 0.9,
-  /** Smallest growth above the surcharge line that justifies another attempt. */
-  minGrowthTokens: 1024,
-  growthRatio: 0.01,
 })
 
 /** Unwrap one live (volatile) config reference. */
@@ -230,38 +227,18 @@ export function calibratedPressure(measurement, pendingTokens, ratio) {
 }
 
 /**
- * Decide whether this step may spend a summary call.
+ * Decide whether this step may spend a soft summary call.
  *
  * The attempt limit counts attempts that did not help; a fold that lowered the
- * pressure re-arms it. Above the surcharge line another attempt is allowed even
- * when the budget is spent, provided the pressure has grown since the last one:
- * sending that request pays the surcharge, so retrying is the cheaper side.
+ * pressure re-arms it. Running out of budget never disables the hard line:
+ * that path has its own forced fold and refusal.
  *
  * @param options.attempts - attempts spent since the last successful fold.
  * @param options.maxAttempts - configured attempt limit.
- * @param options.projected - prompt size this step would send.
- * @param options.line - the rule's surcharge threshold.
- * @param options.lastAttemptTokens - projection when the last attempt started.
- * @param options.emergencyGrowth - growth that justifies an over-budget retry.
- * @returns `attempt`, `emergency` or `exhausted`.
+ * @returns `attempt` or `exhausted`.
  */
-export function attemptPolicy({
-  attempts, maxAttempts, projected, line, lastAttemptTokens, emergencyGrowth,
-}) {
-  if (attempts < maxAttempts) return 'attempt'
-  if (projected < line) return 'exhausted'
-  if (lastAttemptTokens === undefined || projected >= lastAttemptTokens + emergencyGrowth) return 'emergency'
-  return 'exhausted'
-}
-
-/**
- * Growth above the surcharge line that makes an over-budget retry worthwhile.
- * @param cap - trigger line minus the safety margin.
- * @returns the floor in tokens.
- */
-export function emergencyGrowth(cap) {
-  const scale = Number.isFinite(cap) && cap > 0 ? cap : 0
-  return Math.max(CALIBRATION.minGrowthTokens, Math.round(scale * CALIBRATION.growthRatio))
+export function attemptPolicy({ attempts, maxAttempts }) {
+  return attempts < maxAttempts ? 'attempt' : 'exhausted'
 }
 
 /**

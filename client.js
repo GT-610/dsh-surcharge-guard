@@ -70,11 +70,11 @@ window.__ModuleLoader__.load({
     }
 
     const en = {
-      "enforceLine": "Hard surcharge line",
-      "enforceLineHint": "At the surcharge line, prune tool results and force a deep fold; if the request is still over, block the step instead of sending it.",
       "intro": "Set a long-context surcharge threshold per provider and model. The guard estimates pressure, compacts history, and blocks a request at the line; the estimate itself can still undercount.",
       "enabled": "Enable surcharge guard",
       "enabledHint": "Turning this off stops every rule; saved rules are kept.",
+      "enforceLine": "Hard surcharge line",
+      "enforceLineHint": "At the surcharge line, prune tool results and force a deep fold; if the request is still over, block the step instead of sending it.",
       "margin": "Safety margin",
       "marginHint": "Trigger this many tokens below the surcharge line. A larger margin triggers compaction earlier.",
       "retain": "Retain ratio",

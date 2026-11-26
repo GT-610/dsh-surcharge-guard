@@ -1,7 +1,7 @@
 /** Host-side surcharge protection: compact early, enforce the line as a hard boundary. */
 import z from '@deepseek-ai/schemastery'
 import {
-  DEFAULTS, attemptPolicy, blendRatio, calibratedPressure, emergencyGrowth, estimateToolsTokens,
+  DEFAULTS, attemptPolicy, blendRatio, calibratedPressure, estimateToolsTokens,
   foldFloor, normalizeConfig, observedRatio, retentionBudget, ruleFor, selectRange,
 } from './logic.js'
 
@@ -184,7 +184,7 @@ class SurchargeLineError extends Error {
 function boundaryTokens(meter, options, ratio) {
   const scale = Number.isFinite(ratio) && ratio >= 1 ? ratio : 1
   let total = estimateToolsTokens(options)
-  for (const message of options.messages) total += meter.estimateMessage(message)
+  for (const message of options.messages ?? []) total += meter.estimateMessage(message)
   return Math.round(total * scale)
 }
 
@@ -198,7 +198,6 @@ function budgetFor(attempts, session, turn, selection) {
       provider: selection.provider,
       model: selection.model,
       attempts: 0,
-      lastAttemptTokens: undefined,
       reported: new Set(),
     }
     attempts.set(session, budget)
@@ -338,20 +337,10 @@ async function enforce(ctx, config, event, messages, attempts, calibrations, dis
     )
   }
 
-  const policy = attemptPolicy({
-    attempts: budget.attempts,
-    maxAttempts: config.maxAttempts,
-    projected,
-    line,
-    lastAttemptTokens: budget.lastAttemptTokens,
-    emergencyGrowth: emergencyGrowth(cap),
-  })
+  const policy = attemptPolicy({ attempts: budget.attempts, maxAttempts: config.maxAttempts })
   if (policy === 'exhausted') {
     if (projected >= line) warnOnce('exhausted', 'summary budget exhausted, surcharge possible')
     return enforceLine()
-  }
-  if (policy === 'emergency') {
-    ctx.logger.info(`${scope}: above the surcharge line after an unhelpful summary; trying once more`)
   }
   const compaction = compactionFor(ctx, agent)
   if (compaction === undefined) {
@@ -397,7 +386,6 @@ async function enforce(ctx, config, event, messages, attempts, calibrations, dis
   }
   const before = projected
   budget.attempts += 1
-  budget.lastAttemptTokens = projected
   budget.reported.clear()
   let result
   try {
@@ -421,7 +409,6 @@ async function enforce(ctx, config, event, messages, attempts, calibrations, dis
   // A fold that helped re-arms the budget: protection that is working must not
   // be what disables protection for the rest of a long turn.
   budget.attempts = 0
-  budget.lastAttemptTokens = undefined
   if (projected >= cap) {
     warn(projected >= line ? 'still at or above the surcharge line' : 'still within the safety margin')
   }

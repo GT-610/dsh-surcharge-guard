@@ -9,7 +9,7 @@ import assert from 'node:assert/strict'
 
 import {
   normalizeRule, normalizeConfig, ruleFor, balanceCuts, selectRange, retentionBudget, foldFloor,
-  estimateToolsTokens, usageTokens, observedRatio, blendRatio, calibratedPressure, attemptPolicy, emergencyGrowth,
+  estimateToolsTokens, usageTokens, observedRatio, blendRatio, calibratedPressure, attemptPolicy,
   CALIBRATION,
 } from '../logic.js'
 
@@ -334,23 +334,12 @@ test('calibratedPressure scales only the heuristic-priced part', () => {
   assert.equal(calibratedPressure(usageBacked, 1_000, 0.5), 65_000 + 6_000)
 })
 
-test('attemptPolicy re-arms only through a fold, and retries above the line on growth', () => {
-  const base = { maxAttempts: 1, line: 272_000, emergencyGrowth: 1024 }
-  assert.equal(attemptPolicy({ ...base, attempts: 0, projected: 260_000 }), 'attempt')
-  // Spent and under the line: no retry, no alarm.
-  assert.equal(attemptPolicy({ ...base, attempts: 1, projected: 260_000 }), 'exhausted')
-  // Spent at the line with no growth since the last attempt: do not loop.
-  assert.equal(attemptPolicy({ ...base, attempts: 1, projected: 272_000, lastAttemptTokens: 272_000 }), 'exhausted')
-  // Spent above the line after growth: one more attempt is cheaper than paying.
-  assert.equal(attemptPolicy({ ...base, attempts: 1, projected: 300_000, lastAttemptTokens: 272_000 }), 'emergency')
-  // No previous attempt on record still counts as growth to protect against.
-  assert.equal(attemptPolicy({ ...base, attempts: 1, projected: 272_000 }), 'emergency')
-})
-
-test('emergencyGrowth scales with the trigger but keeps a visible floor', () => {
-  assert.equal(emergencyGrowth(252_000), 2520)
-  assert.equal(emergencyGrowth(900), 1024)
-  assert.equal(emergencyGrowth(0), 1024)
+test('attemptPolicy stops soft attempts at the budget and never invents one', () => {
+  assert.equal(attemptPolicy({ attempts: 0, maxAttempts: 1 }), 'attempt')
+  assert.equal(attemptPolicy({ attempts: 1, maxAttempts: 1 }), 'exhausted')
+  assert.equal(attemptPolicy({ attempts: 2, maxAttempts: 2 }), 'exhausted')
+  // The hard line is a separate path: exhaustion here never blocks it.
+  assert.equal(attemptPolicy({ attempts: 0, maxAttempts: 0 }), 'exhausted')
 })
 
 test('the hard line defaults on and honours an explicit opt-out', () => {

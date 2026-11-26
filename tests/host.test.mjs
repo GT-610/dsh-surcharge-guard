@@ -273,19 +273,6 @@ test('a fold that lowers the pressure re-arms the attempt budget within the turn
   assert.deepEqual(probe.calls.warnings, [])
 })
 
-test('a spent budget still retries above the line once the pressure has grown', async () => {
-  const probe = fixture({ config: { ...options, maxAttempts: 1 }, total: 1200, error: Error('offline summary failure') })
-  await probe.step()
-  // Unchanged pressure is not worth another doomed summary.
-  await probe.step()
-  assert.equal(probe.calls.compacts.length, 1)
-  // A larger request is a different, more expensive one: skipping it pays the
-  // surcharge, so the emergency path spends one more attempt.
-  await probe.step({ beforeDecision: setPressure => setPressure(2500) })
-  assert.equal(probe.calls.compacts.length, 2)
-  assert.match(probe.calls.logs.join('\n'), /above the surcharge line after an unhelpful summary/)
-})
-
 test('prices admitted messages at the ratio observed between usage and the heuristic', async () => {
   // Trigger 100,000 minus a 20,000 margin is 80,000. The provider counted
   // 70,000 for a surface the 4-chars heuristic prices at 30,000, so 5,000
