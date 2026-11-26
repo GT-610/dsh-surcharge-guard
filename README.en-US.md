@@ -17,7 +17,7 @@ After enabling the plugin, open **Plugins → Surcharge guard**:
 |---|---|
 | Compact earlier | Raise the safety margin; this may spend more on summaries |
 | Keep more recent history | Raise the retain ratio within `0.01–0.9`; it is a ceiling, and a large gap folds deeper |
-| Limit compaction attempts per turn | Set the summary attempt limit, default `2`; `0` disables guard compaction, and one step folds at most once |
+| Bound repeated summaries | Set the summary attempt limit, default `2`. It counts attempts that failed or did not lower the pressure; a helpful fold re-arms it. `0` disables guard compaction, and one step folds at most once |
 | Write summaries with a cheaper model | Pick a provider and model under the rule's **Summary model**; choose **Use existing summary settings** to restore the default |
 | Spend less on summary reasoning | After choosing a summary model, pick one of its **Summary reasoning effort** levels; **Use the model default** overrides nothing |
 | Pause protection without removing rules | Turn the master switch off |
@@ -27,7 +27,10 @@ Thresholds and margins accept values such as `272000`, `272K`, and `1.05M`. Chan
 ## How one fold is chosen
 
 - **One fold per step.** A second fold in the same step can only re-summarize the checkpoint the first one wrote: it buys almost nothing and pays for another model call. A residual gap is reported instead.
+- **A helpful fold re-arms protection.** The summary attempt limit counts attempts that failed or did not lower the pressure. A fold that really lowers it resets the count, so a long turn that keeps growing back over the trigger stays protected instead of going quiet for the rest of the turn.
+- **One more try above the line.** When failed attempts have spent the budget but the request has reached the surcharge line, and the pressure has grown since the last attempt, the guard folds once more regardless of the limit: that request pays the surcharge anyway, so retrying is the cheaper side.
 - **Depth follows the gap.** The retain ratio is a ceiling for the verbatim tail, not a fixed budget. When the recorded pressure sits far above the trigger and the tail would keep everything worth folding, the tail shrinks toward its floor so one fold can actually land under the line.
+- **The estimate is calibrated per route.** `measure()` reports the last provider count plus new content priced at four characters per token. The guard scales that new part by the ratio observed between provider counts and the heuristic price on the same route, so a fixed denominator cannot quietly consume the safety margin. The ratio only moves up immediately and is released slowly.
 - **No summary of a summary.** A candidate span that holds nothing but the checkpoints earlier folds wrote, or whose reclaim cannot cover the replacement, is not compacted at all.
 - **No duplicate fold with native compaction.** If another middleware already replaced this step's surface, the guard does not add a second transaction.
 
@@ -39,7 +42,7 @@ If the route cannot serve the chosen level at run time, the guard logs a warning
 
 ## Limitations
 
-- This is **best-effort protection, not a billing cap**. The guard estimates committed history and messages admitted for the step. Later prompt updates, tool definitions, attachment pricing, retries, and provider counts can differ.
+- This is **best-effort protection, not a billing cap**. The guard estimates committed history and messages admitted for the step, and calibrates the new part against the ratio recently observed between provider counts and the heuristic. A tokenizer change, tool definitions or attachments expanded at request time, retries, and provider counts can still differ for a single step, and the calibration comes from requests that already happened, so the first step that inflates abnormally can still cross the line.
 - If there is no safe range, summarization fails, or the estimate remains above the line, the original request is not blocked. The session's DSH backend runs compaction, and its summary request may incur charges. The guard's attempt limit does not cap DSH's built-in compaction or internal backend retries, and it never folds the same step twice. When nothing is worth folding, that refusal is reported once per turn rather than on every step.
 - A custom summary model needs DSH's Basic compaction backend and enough context capacity. Switching models usually cannot reuse the chat model's prefix cache, so the summary itself may be slower or cost more. If the selected route fails, the guard logs a warning and continues the step without falling back to the original route, and that step can still cross the line.
 - A summary reasoning effort applies only to the chosen summary model; DSH's own summary settings, manual compaction, and the chat route keep theirs. Effort names are provider-defined, so the same name need not mean the same thinking budget across models.
