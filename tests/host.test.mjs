@@ -319,13 +319,41 @@ test('a failed summary that spent the budget reports it once per turn', async ()
 })
 
 test('a fold that does not lower the pressure does not re-arm the budget', async () => {
-  // The post-fold re-price must use the same ratio: a second blend of the same
-  // anchored observation would decay the ratio, lower the estimate, and make a
-  // no-progress fold look helpful.
-  const probe = fixture({ config: { ...options, maxAttempts: 1 }, total: 1200, shrink: [1200] })
+  // Step 1 learns a 3x ratio from a provider-backed measurement, below the
+  // trigger. Step 2 offers a lower, fixed 2x sample and then folds without
+  // changing the measurement. Re-blending that same sample after the fold
+  // would decay 2.9 to 2.81, lower the estimate, and make a no-progress fold
+  // look helpful enough to re-arm the budget.
+  let usage = 54_000
+  const prices = { 0: 2000, 1: 4000, 2: 12000 }
+  const probe = fixture({
+    config: {
+      ...options,
+      maxAttempts: 1,
+      rules: [{ ...route, surchargeAtTokens: 90_000 }],
+      safetyMarginTokens: 30_000,
+    },
+    prices,
+    total: 54_000,
+    shrink: [36_000],
+    measure: ({ pressure, nodes }) => ({
+      totalTokens: pressure,
+      surfaceTokens: 18_000,
+      surfaceDeltaTokens: 0,
+      baseline: { kind: 'usage', usage: { inputTokens: usage, outputTokens: 0 } },
+      nodes,
+    }),
+  })
   await probe.step()
-  await probe.step()
-  assert.equal(probe.calls.compacts.length, 1)
+  await probe.step({
+    claimed: [user(20_000)],
+    // 36,000 provider tokens over 18,000 heuristic is a 2x sample, below the 3x
+    // ratio the previous step learned. 36,000 + 20,000 * 2.9 = 94,000, over the
+    // 60,000 trigger; the fold leaves the measurement identical.
+    beforeDecision: setPressure => { usage = 36_000; setPressure(36_000) },
+  })
+  await probe.step({ claimed: [user(20_000)] })
+  assert.equal(probe.calls.compacts.length, 1, 'the no-progress fold must not re-arm the budget')
   assert.match(probe.calls.warnings.join('\n'), /budget exhausted/)
 })
 
