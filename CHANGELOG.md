@@ -1,6 +1,19 @@
 # Changelog
 
 ## Unreleased
+- Enforce the surcharge line as a hard boundary. A fold cannot always lower the pressure (a
+  failing summary, no safe range, a huge retained head), and the guard used to warn and send the
+  request anyway, paying the higher rate. It now follows native context-overflow recovery: prune
+  tool results without a model call, force one depth-zero fold that bypasses the attempt budget,
+  and if the request is still priced at or above the line, refuse to dispatch the step. The turn
+  ends with an error instead of the provider billing the whole request at 2x. A last gate on the
+  `llm/stream` waterfall reprices the exact outgoing messages and tools, so growth after the
+  pre-step cannot slip through; compaction summaries are exempt. On by default (`enforceLine`),
+  and `maxAttempts: 0` disables it with the rest of the guard.
+- Keep the adapter's real context window. Setting it to the surcharge line makes native compaction
+  fold at `min(window x 0.8, window - maxTokens - 65536)`: a 272K window with a 128K output
+  reservation and the default headroom leaves only 78,464 tokens, which is the repeated
+  ~78K churn. The surcharge line is a billing boundary, not a model capacity.
 - Re-arm the summary attempt budget on a fold that actually lowers the pressure. The limit used
   to be a per-turn counter that only advanced, so two failed (or two successful but later
   outgrown) folds silenced the guard for the rest of a long turn: a real session sat at 320K for

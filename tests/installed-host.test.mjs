@@ -198,6 +198,8 @@ test('installed DSH: an unsupported effort skips the transaction and leaves no m
   const target = { provider: 'offline-summary', model: 'cheap', reasoningEffort: 'unsupported' }
   const fiber = ctx.plugin({ apply: guard.apply, Config: guard.Config, inject: guard.inject }, {
     rules: [{ ...route, surchargeAtTokens: 1000, summaryTarget: target }], safetyMarginTokens: 100, maxAttempts: 1,
+    // This test is about the effort pre-flight, not the hard line.
+    enforceLine: false,
   })
   try {
     await new Promise(resolve => setImmediate(resolve))
@@ -272,5 +274,81 @@ test('installed DSH: prices new content at the observed provider/heuristic ratio
     assert.equal(estimated.summaries.length, 0, 'an uncalibrated heuristic stays below the cap')
   } finally {
     await control.dispose()
+  }
+})
+
+test('installed DSH: the hard line rejects the step instead of dispatching', { skip: !useInstalled }, async () => {
+  const { ctx, route, agent, signal, streams, summaries, user, agentEvents } = await run()
+  // A summary route the pre-flight rejects leaves no way to lower the history,
+  // so the hard line must fail the step before any provider request is built.
+  const fiber = ctx.plugin({ apply: guard.apply, Config: guard.Config, inject: guard.inject }, {
+    rules: [{
+      ...route,
+      surchargeAtTokens: 1000,
+      summaryTarget: { provider: 'offline-summary', model: 'cheap', reasoningEffort: 'unsupported' },
+    }],
+    safetyMarginTokens: 100,
+    maxAttempts: 1,
+    enforceLine: true,
+  })
+  try {
+    await new Promise(resolve => setImmediate(resolve))
+    const admitted = [user('new step input')]
+    await assert.rejects(
+      agentEvents(ctx, agent).waterfall('agent/pre-step', {
+        turn: 1, step: 1, signal, modelSelection: route, messages: admitted,
+      }, async () => ({ kind: 'enter', messages: admitted })),
+      error => error.name === 'SurchargeLineError' && /blocked instead of sent/.test(error.message),
+    )
+    // No summary or main provider call was attempted.
+    assert.equal(summaries.length, 0)
+    assert.equal(streams.length, 0)
+  } finally {
+    await fiber.dispose()
+  }
+})
+
+test('installed DSH: the dispatch gate blocks an over-line request on the real waterfall', { skip: !useInstalled }, async () => {
+  const history = Array.from({ length: 3 }, () => 'history content '.repeat(2500))
+  const usage = { inputTokens: 70_000, outputTokens: 100, totalTokens: 70_100 }
+  const { ctx, session, route, agent, signal, streams, user, agentEvents, ...rest } = await run({
+    anchor: { history, usage },
+  })
+  void rest
+  const fiber = ctx.plugin({ apply: guard.apply, Config: guard.Config, inject: guard.inject }, {
+    rules: [{ ...route, surchargeAtTokens: 100_000 }],
+    safetyMarginTokens: 20_000,
+    maxAttempts: 1,
+    enforceLine: true,
+  })
+  try {
+    await new Promise(resolve => setImmediate(resolve))
+    // A step below the trigger still learns the route's provider/heuristic
+    // ratio before the boundary is ever consulted.
+    const admitted = [user('tiny step input')]
+    await agentEvents(ctx, agent).waterfall('agent/pre-step', {
+      turn: 1, step: 2, signal, modelSelection: route, messages: admitted,
+    }, async () => ({ kind: 'enter', messages: admitted }))
+    const huge = user('x'.repeat(300_000))
+    const request = {
+      provider: route.provider,
+      model: route.model,
+      sessionId: session.id,
+      messages: [huge],
+    }
+    // The offline harness overrides `stream` itself, so dispatch through the
+    // real waterfall the llm runtime uses.
+    assert.throws(
+      () => ctx.waterfall(ctx.get('llm'), 'llm/stream', request, () => 'stream'),
+      error => error.name === 'SurchargeLineError' && /blocked before dispatch/.test(error.message),
+    )
+    // A request below the line still reaches the next listener.
+    assert.equal(ctx.waterfall(ctx.get('llm'), 'llm/stream', {
+      ...request, messages: [user('small request')],
+    }, () => 'stream'), 'stream')
+    // The adapter never saw the over-line request.
+    assert.equal(streams.length, 0)
+  } finally {
+    await fiber.dispose()
   }
 })

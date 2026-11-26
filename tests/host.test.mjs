@@ -10,18 +10,22 @@ const options = {
   safetyMarginTokens: 100,
   retainRatio: 0.15,
   maxAttempts: 2,
+  // The legacy tests below exercise the soft budget; hard-line tests opt in.
+  enforceLine: false,
 }
 const user = tokens => ({ role: 'user', tokens })
 /** Default price of one surface node in the fake meter. */
 const NODE_TOKENS = 40000
 
 function fixture({ config = options, total = 900, previous, available = true, shrink = [400], error, root = false,
-  backend, isolated, llm, prices = {}, checkpoints = [], measure } = {}) {
+  backend, isolated, llm, prices = {}, checkpoints = [], measure, pruner } = {}) {
   let hook
+  let streamHook
   let pressure = total
   const calls = { estimates: [], measures: [], compacts: [], warnings: [], logs: [], services: [], next: 0,
     isolated: [], provided: [], released: [] }
   const session = {
+    id: 'session-test',
     // `replaceGeneration` advances whenever any middleware replaces the
     // surface, which is how the guard tells that this step was already folded.
     surface: { nodes: [0, 1, 2], replaceGeneration: 0 },
@@ -42,11 +46,13 @@ function fixture({ config = options, total = 900, previous, available = true, sh
   const ctx = {
     get(key) {
       if (!available) return undefined
+      if (key === 'toolResultPruner') return pruner
       if (key === 'llm') return llm === undefined ? undefined : traced(llm)
       if (root) return key === 'compaction' ? compaction : undefined
       return key === 'agentPresets' ? { serviceFor(owner, name) {
         calls.services.push({ owner, name })
-        return compaction
+        if (name === 'toolResultPruner') return pruner
+        return name === 'compaction' ? compaction : undefined
       } } : undefined
     },
     isolate(name) {
@@ -95,10 +101,20 @@ function fixture({ config = options, total = 900, previous, available = true, sh
       return scope(realm, { value: undefined, started: false })
     },
     on(name, handler, opts) {
-      assert.equal(hook, undefined)
-      assert.equal(name, 'agent/pre-step')
-      assert.deepEqual(opts, { prepend: true })
-      hook = handler
+      if (name === 'session/disposed') {
+        assert.equal(opts, undefined)
+        return
+      }
+      if (name === 'agent/pre-step') {
+        assert.deepEqual(opts, { prepend: true })
+        assert.equal(hook, undefined)
+        hook = handler
+        return
+      }
+      assert.equal(name, 'llm/stream')
+      assert.deepEqual(opts, { global: true, prepend: true })
+      assert.equal(streamHook, undefined)
+      streamHook = handler
     },
     tokenMeter: {
       estimateMessage(msg) { calls.estimates.push(msg); return msg.tokens },
@@ -124,7 +140,16 @@ function fixture({ config = options, total = 900, previous, available = true, sh
     })
     assert.equal(result, decision)
   }
-  return { step, session, agent, calls }
+  /** Fire the dispatch gate as if the llm service were about to stream. */
+  function dispatch(options) {
+    let dispatched = false
+    const result = streamHook(options, () => {
+      dispatched = true
+      return 'stream'
+    })
+    return { result, dispatched }
+  }
+  return { step, session, agent, calls, dispatch, setPressure: value => { pressure = value } }
 }
 
 test('first-step pressure includes the admitted messages and resolves the isolated backend', async () => {
@@ -306,6 +331,91 @@ test('a failed summary that spent the budget reports it once per turn', async ()
   assert.equal(probe.calls.compacts.length, 1)
 })
 
+test('the hard line prunes tool results before it spends a forced fold', async () => {
+  let setPressure
+  const pruner = {
+    calls: 0,
+    pruneSession() {
+      this.calls += 1
+      setPressure(900)
+      return { pruned: [1], charsRemoved: 4000 }
+    },
+  }
+  const probe = fixture({
+    config: { ...options, enforceLine: true, maxAttempts: 1 },
+    total: 1200,
+    error: Error('summary backend down'),
+    pruner,
+  })
+  setPressure = probe.setPressure
+  await probe.step()
+  // The soft attempt failed, but pruning alone brought the step back under the
+  // line, so no second summary was spent and nothing was blocked.
+  assert.equal(probe.calls.compacts.length, 1)
+  assert.equal(pruner.calls, 1)
+  assert.match(probe.calls.logs.join('\n'), /pruned 1 tool results \(4000 chars\)/)
+  assert.doesNotMatch(probe.calls.logs.join('\n'), /emergency fold/)
+})
+
+test('the hard line forces one depth-zero fold when a normal fold is not enough', async () => {
+  // The soft fold lands at 1,400, still above the 1,000-token line; the forced
+  // fold (retain 0) reaches 400 and the step continues.
+  const probe = fixture({
+    config: { ...options, enforceLine: true, maxAttempts: 1 },
+    total: 1800,
+    shrink: [1400, 400],
+  })
+  await probe.step()
+  assert.equal(probe.calls.compacts.length, 2)
+  assert.match(probe.calls.logs.join('\n'), /emergency fold for the line/)
+})
+
+test('the hard line blocks a step that neither pruning nor a fold can lower', async () => {
+  const probe = fixture({ config: { ...options, enforceLine: true, maxAttempts: 1 }, total: 1200, shrink: [1200] })
+  await assert.rejects(
+    probe.step(),
+    error => error.name === 'SurchargeLineError' && /blocked instead of sent/.test(error.message),
+  )
+  // One soft attempt, one forced attempt, then a refusal to dispatch.
+  assert.equal(probe.calls.compacts.length, 2)
+})
+
+test('the dispatch boundary blocks an over-line request and exempts summaries', async () => {
+  // Learn a 2.2x ratio from one provider-backed measurement, then price the
+  // exact outgoing request: 50,000 heuristic tokens are ~111,500 provider
+  // tokens, above the 100,000-token line.
+  const prices = { 0: 2000, 1: 14000, 2: 14000 }
+  const probe = fixture({
+    config: {
+      ...options,
+      enforceLine: true,
+      rules: [{ ...route, surchargeAtTokens: 100000 }],
+      safetyMarginTokens: 20000,
+    },
+    prices,
+    total: 70000,
+    shrink: [40000],
+    measure: ({ pressure, nodes }) => ({
+      totalTokens: pressure,
+      surfaceTokens: 30000,
+      surfaceDeltaTokens: 0,
+      baseline: { kind: 'usage', usage: { inputTokens: pressure, outputTokens: 0 } },
+      nodes,
+    }),
+  })
+  await probe.step({ claimed: [user(5000)] })
+  const request = messages => ({
+    provider: route.provider, model: route.model, sessionId: 'session-test', messages,
+  })
+  assert.throws(
+    () => probe.dispatch(request([user(50_000)])),
+    error => error.name === 'SurchargeLineError' && /blocked before dispatch/.test(error.message),
+  )
+  assert.equal(probe.dispatch(request([user(40_000)])).dispatched, true)
+  // The guard's own compaction call is the recovery mechanism, never a target.
+  assert.equal(probe.dispatch({ ...request([user(500_000)]), purpose: 'compaction' }).dispatched, true)
+})
+
 test('no safe range does not spend the turn budget; absent compaction warns and passes through', async () => {
   const noRange = fixture({ config: { ...options, maxAttempts: 1 } })
   noRange.session.surface.nodes = [0, 1]
@@ -352,10 +462,14 @@ test('disabled, zero-budget, rejected and aborted steps never measure or summari
 test('reads the real schema defaults and inclusive retention boundaries', () => {
   for (const retainRatio of [0.01, 0.9]) {
     const config = normalizeConfig(Config({ retainRatio, maxAttempts: 0, safetyMarginTokens: 0, rules: null }))
-    assert.deepEqual(config, { enabled: true, retainRatio, maxAttempts: 0, safetyMarginTokens: 0, rules: [] })
+    assert.deepEqual(config, {
+      enabled: true, retainRatio, maxAttempts: 0, safetyMarginTokens: 0, rules: [], enforceLine: true,
+    })
   }
   const defaults = normalizeConfig(Config({}))
-  assert.deepEqual(defaults, { enabled: true, rules: [], retainRatio: 0.16, maxAttempts: 2, safetyMarginTokens: 20000 })
+  assert.deepEqual(defaults, {
+    enabled: true, rules: [], retainRatio: 0.16, maxAttempts: 2, safetyMarginTokens: 20000, enforceLine: true,
+  })
 })
 
 test('live updates take effect without reapplying the plugin', async () => {

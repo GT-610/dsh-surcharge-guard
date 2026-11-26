@@ -352,3 +352,12 @@ test('emergencyGrowth scales with the trigger but keeps a visible floor', () => 
   assert.equal(emergencyGrowth(900), 1024)
   assert.equal(emergencyGrowth(0), 1024)
 })
+
+test('the hard line defaults on and honours an explicit opt-out', () => {
+  assert.equal(normalizeConfig({}).enforceLine, true)
+  assert.equal(normalizeConfig({ enforceLine: false }).enforceLine, false)
+  assert.equal(normalizeConfig({ enforceLine: true }).enforceLine, true)
+  // Only an explicit false disables it; an unusable value keeps the safe default.
+  assert.equal(normalizeConfig({ enforceLine: 'yes' }).enforceLine, true)
+  assert.equal(normalizeConfig({ enforceLine: { get: () => false } }).enforceLine, false)
+})

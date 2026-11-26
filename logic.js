@@ -4,6 +4,8 @@ export const DEFAULTS = Object.freeze({
   safetyMarginTokens: 20000,
   retainRatio: 0.16,
   maxAttempts: 2,
+  /** Treat the surcharge line as a hard boundary: prune, force a fold, then block. */
+  enforceLine: true,
 })
 
 /** Verbatim tail kept even when the gap would allow folding deeper. */
@@ -109,6 +111,7 @@ export function normalizeConfig(raw) {
     ),
     retainRatio: ratioOf(liveValue(source.retainRatio, DEFAULTS.retainRatio), DEFAULTS.retainRatio),
     maxAttempts: nonNegativeInteger(liveValue(source.maxAttempts, DEFAULTS.maxAttempts), DEFAULTS.maxAttempts),
+    enforceLine: liveValue(source.enforceLine, DEFAULTS.enforceLine) !== false,
   }
 }
 

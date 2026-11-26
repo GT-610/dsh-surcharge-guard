@@ -1,13 +1,24 @@
-/** Host-side, best-effort surcharge protection for model requests. */
+/** Host-side surcharge protection: compact early, enforce the line as a hard boundary. */
 import z from '@deepseek-ai/schemastery'
 import {
-  DEFAULTS, attemptPolicy, blendRatio, calibratedPressure, emergencyGrowth,
+  DEFAULTS, attemptPolicy, blendRatio, calibratedPressure, emergencyGrowth, estimateToolsTokens,
   foldFloor, normalizeConfig, observedRatio, retentionBudget, ruleFor, selectRange,
 } from './logic.js'
 
 function compactionFor(ctx, agent) {
   // Web presets own an isolated backend; a standalone profile may own it at root.
   return ctx.get('agentPresets')?.serviceFor(agent, 'compaction') ?? ctx.get('compaction')
+}
+
+function prunerFor(ctx, agent) {
+  // The standard preset isolates the pruner beside compaction, so the root
+  // context cannot see it; resolve it through the preset first, then at root.
+  // A preset without that service must not break the hard line.
+  try {
+    return ctx.get('agentPresets')?.serviceFor(agent, 'toolResultPruner') ?? ctx.get('toolResultPruner')
+  } catch {
+    return undefined
+  }
 }
 
 /**
@@ -155,6 +166,28 @@ function projectedHeader(session, selection) {
   }
 }
 
+/** A step the guard refused to dispatch because it prices at or above the line. */
+class SurchargeLineError extends Error {
+  constructor(message) {
+    super(message)
+    this.name = 'SurchargeLineError'
+  }
+}
+
+/**
+ * Whole-prompt heuristic price of the request that is about to be dispatched.
+ *
+ * The pre-step estimate anchors on the provider's own count and only prices the
+ * delta. At the dispatch boundary there is no count to anchor on, so this
+ * prices every message and the tool schemas at the route's observed ratio.
+ */
+function boundaryTokens(meter, options, ratio) {
+  const scale = Number.isFinite(ratio) && ratio >= 1 ? ratio : 1
+  let total = estimateToolsTokens(options)
+  for (const message of options.messages) total += meter.estimateMessage(message)
+  return Math.round(total * scale)
+}
+
 /** Attempt state for one turn of one session, route included. */
 function budgetFor(attempts, session, turn, selection) {
   let budget = attempts.get(session)
@@ -180,7 +213,7 @@ function budgetFor(attempts, session, turn, selection) {
  * tokenizer's expansion factor onto another, and per session so a long-lived
  * conversation does not leak its ratio into a fresh one.
  */
-function ratioFor(calibrations, session, selection, measurement, header) {
+function ratioFor(calibrations, dispatchRatios, session, selection, measurement, header) {
   let routes = calibrations.get(session)
   if (routes === undefined) {
     routes = new Map()
@@ -189,10 +222,12 @@ function ratioFor(calibrations, session, selection, measurement, header) {
   const key = `${selection.provider}\u0000${selection.model}`
   const ratio = blendRatio(routes.get(key), observedRatio(measurement, header))
   routes.set(key, ratio)
+  // The dispatch-time backstop has no session object, only its id.
+  dispatchRatios.set(`${String(session.id)}\u0000${key}`, ratio)
   return ratio
 }
 
-async function enforce(ctx, config, event, messages, attempts, calibrations, generation) {
+async function enforce(ctx, config, event, messages, attempts, calibrations, dispatchRatios, generation) {
   const { agent, signal, modelSelection, turn } = event
   const selection = modelSelection ?? agent.model?.current()
   if (selection === undefined) return
@@ -208,9 +243,9 @@ async function enforce(ctx, config, event, messages, attempts, calibrations, gen
   const scope = `surcharge guard (${rule.provider}/${rule.model})`
   // Native compaction and any other pre-step middleware have already run by
   // the time this executes. A surface they replaced in this same step is a
-  // compaction the guard must not repeat: a second summary in one step is the
-  // double fold this plugin exists to avoid, and it can only rewrite the
-  // checkpoint the first one wrote.
+  // compaction the guard must not repeat: it would rewrite the checkpoint that
+  // step just wrote for no additional reclaim. The line's emergency fold below
+  // is different: it folds deeper because the request is still over.
   const surface = session.surface
   if (generation !== undefined && surface?.replaceGeneration !== undefined
     && surface.replaceGeneration !== generation) {
@@ -223,10 +258,15 @@ async function enforce(ctx, config, event, messages, attempts, calibrations, gen
   // is not the size of the next request. Price the delta and the admitted
   // messages at the route's observed expansion factor, or a fixed 4-chars
   // denominator quietly spends the whole safety margin.
-  let ratio = ratioFor(calibrations, session, selection, measurement, header)
+  let ratio = ratioFor(calibrations, dispatchRatios, session, selection, measurement, header)
   let projected = calibratedPressure(measurement, pendingTokens, ratio)
   if (projected < cap || signal.aborted) return
 
+  const reread = () => {
+    measurement = measure()
+    ratio = ratioFor(calibrations, dispatchRatios, session, selection, measurement, header)
+    projected = calibratedPressure(measurement, pendingTokens, ratio)
+  }
   const budget = budgetFor(attempts, session, turn, selection)
   const warn = reason => ctx.logger.warn(
     `${scope}: ${reason}; continuing with an estimated ${projected} prompt tokens `
@@ -239,6 +279,65 @@ async function enforce(ctx, config, event, messages, attempts, calibrations, gen
     budget.reported.add(key)
     warn(reason)
   }
+
+  /**
+   * Hold the surcharge line as a hard boundary.
+   *
+   * Native compaction treats the model's context window the same way, except
+   * the provider is what rejects an over-window request. Nothing rejects a
+   * surcharge line: the provider accepts it and bills the higher rate. So the
+   * guard reproduces native recovery locally: prune tool results without a
+   * model call, force one depth-zero fold, and if the request is still priced
+   * at or above the line, refuse to dispatch it.
+   */
+  async function enforceLine({ foldable = true } = {}) {
+    if (!config.enforceLine || signal.aborted || projected < line) return
+    const pruner = prunerFor(ctx, agent)
+    if (pruner !== undefined) {
+      try {
+        const pruned = pruner.pruneSession(session)
+        if (pruned.pruned.length > 0) {
+          ctx.logger.info(`${scope}: pruned ${pruned.pruned.length} tool results `
+            + `(${pruned.charsRemoved} chars) to stay under the ${line}-token line`)
+          reread()
+        }
+      } catch (error) {
+        if (signal.aborted) return
+        ctx.logger.warn(`${scope}: tool-result pruning failed: ${error instanceof Error ? error.message : String(error)}`
+          + '; trying a fold')
+      }
+    }
+    if (projected < line || signal.aborted) return
+    const compaction = foldable ? compactionFor(ctx, agent) : undefined
+    if (compaction !== undefined) {
+      try {
+        const bound = await resolveSummaryEffort(ctx, rule, signal)
+        if (signal.aborted) return
+        const floor = foldFloor(cap)
+        const range = selectRange(session, measure().nodes, 0, floor)
+        if (range !== undefined) {
+          const before = projected
+          const result = rule.summaryTarget === undefined
+            ? await compaction.compactRegion(range.start, range.end, agent, signal)
+            : await compactWithSummaryTarget(ctx, compaction, rule, range, agent, signal, bound)
+          if (signal.aborted) return
+          reread()
+          budget.attempts = 0
+          ctx.logger.info(`${scope}: emergency fold for the line; estimated ${before} → ${projected} prompt tokens`)
+        }
+      } catch (error) {
+        if (signal.aborted) return
+        ctx.logger.warn(`${scope}: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    if (projected < line || signal.aborted) return
+    throw new SurchargeLineError(
+      `${scope}: the next request is estimated at ${projected} prompt tokens, at or above the `
+      + `${line}-token surcharge line; pruning and compaction could not lower it, so the step `
+      + 'was blocked instead of sent',
+    )
+  }
+
   const policy = attemptPolicy({
     attempts: budget.attempts,
     maxAttempts: config.maxAttempts,
@@ -249,7 +348,7 @@ async function enforce(ctx, config, event, messages, attempts, calibrations, gen
   })
   if (policy === 'exhausted') {
     if (projected >= line) warnOnce('exhausted', 'summary budget exhausted, surcharge possible')
-    return
+    return enforceLine()
   }
   if (policy === 'emergency') {
     ctx.logger.info(`${scope}: above the surcharge line after an unhelpful summary; trying once more`)
@@ -257,7 +356,7 @@ async function enforce(ctx, config, event, messages, attempts, calibrations, gen
   const compaction = compactionFor(ctx, agent)
   if (compaction === undefined) {
     warn('no compaction service')
-    return
+    return enforceLine()
   }
   // A summary effort the route cannot serve is settled before the first
   // attempt is spent: a mis-set level must not disable the rule's protection
@@ -269,7 +368,9 @@ async function enforce(ctx, config, event, messages, attempts, calibrations, gen
   } catch (error) {
     if (signal.aborted) return
     warn(error instanceof Error ? error.message : String(error))
-    return
+    // A mis-set level cannot succeed on a retry, but pruning and the hard
+    // line still apply.
+    return enforceLine({ foldable: false })
   }
   if (signal.aborted) return
 
@@ -292,7 +393,7 @@ async function enforce(ctx, config, event, messages, attempts, calibrations, gen
     // this line on every step of the turn. The surface it judged is unchanged
     // between them, so one report per turn is enough; the next turn re-checks.
     warnOnce('refused', 'no safe history range worth folding')
-    return
+    return enforceLine()
   }
   const before = projected
   budget.attempts += 1
@@ -306,19 +407,16 @@ async function enforce(ctx, config, event, messages, attempts, calibrations, gen
   } catch (error) {
     if (signal.aborted) return
     // A failed summary is one spent attempt, not a reason to stop protecting
-    // the turn: the next step may still succeed, and the emergency path above
-    // the surcharge line retries even when the budget is gone.
+    // the turn: the next step may still succeed, and the line still applies.
     warn(error instanceof Error ? error.message : String(error))
-    return
+    return enforceLine()
   }
   if (signal.aborted) return
-  measurement = measure()
-  ratio = ratioFor(calibrations, session, selection, measurement, header)
-  projected = calibratedPressure(measurement, pendingTokens, ratio)
+  reread()
   ctx.logger.info(`${scope}: folded ${result.shadowedSeqs.length} nodes; estimated ${before} → ${projected} prompt tokens`)
   if (projected >= before) {
     warn('compaction did not lower the estimated pressure')
-    return
+    return enforceLine()
   }
   // A fold that helped re-arms the budget: protection that is working must not
   // be what disables protection for the rest of a long turn.
@@ -327,6 +425,7 @@ async function enforce(ctx, config, event, messages, attempts, calibrations, gen
   if (projected >= cap) {
     warn(projected >= line ? 'still at or above the surcharge line' : 'still within the safety margin')
   }
+  return enforceLine()
 }
 
 /** All fields are volatile so edits apply without restarting a running agent. */
@@ -349,15 +448,19 @@ export const Config = z.object({
   retainRatio: z.number().min(0.01).max(0.9).default(DEFAULTS.retainRatio).volatile(),
   /** Unhelpful attempts allowed between folds; a helpful fold re-arms it. */
   maxAttempts: z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER).default(DEFAULTS.maxAttempts).volatile(),
+  /** Refuse to dispatch a request priced at or above the line. */
+  enforceLine: z.boolean().default(DEFAULTS.enforceLine).volatile(),
 })
 
 export const inject = ['tokenMeter']
 
 export function apply(ctx, rawConfig) {
   // Per-session attempt state and per-route token calibration; both are keyed
-  // weakly so a finished session is collected with its guard state.
+  // weakly so a finished session is collected with its guard state. The
+  // dispatch-time gate has no session object, only its id.
   const attempts = new WeakMap()
   const calibrations = new WeakMap()
+  const dispatchRatios = new Map()
 
   ctx.on('agent/pre-step', async (event, next) => {
     // Let native compaction and other downstream middleware run first, then
@@ -370,13 +473,47 @@ export function apply(ctx, rawConfig) {
     try {
       const config = normalizeConfig(rawConfig)
       if (!config.enabled || config.rules.length === 0 || config.maxAttempts === 0) return decision
-      await enforce(ctx, config, event, decision.messages, attempts, calibrations, generation)
+      await enforce(ctx, config, event, decision.messages, attempts, calibrations, dispatchRatios, generation)
     } catch (error) {
+      // A refused dispatch is the one failure this middleware must propagate:
+      // swallowing it would send the over-line request it exists to prevent.
+      if (error instanceof SurchargeLineError) throw error
       if (!signal.aborted) {
         ctx.logger.warn(`surcharge guard: ${error instanceof Error ? error.message : String(error)}; continuing the step`)
       }
     }
     return decision
   }, { prepend: true })
+
+  /**
+   * Last line of defence at the dispatch boundary.
+   *
+   * The pre-step estimate anchors on the previous provider count and can drift
+   * once the loop refreshes the system prompt or admits late context. This
+   * prices the exact outgoing request instead, with the same route ratio. A
+   * compaction summary is exempt: it is the recovery mechanism, and its own
+   * route may be a different, unguarded model.
+   */
+  ctx.on('llm/stream', (options, next) => {
+    const config = normalizeConfig(rawConfig)
+    if (!config.enabled || config.maxAttempts === 0 || !config.enforceLine) return next()
+    if (options.purpose !== undefined || options.sessionId === undefined) return next()
+    const rule = ruleFor(config, options)
+    if (rule === undefined) return next()
+    const ratio = dispatchRatios.get(`${String(options.sessionId)}\u0000${options.provider}\u0000${options.model}`)
+    const estimated = boundaryTokens(ctx.tokenMeter, options, ratio)
+    if (estimated < rule.surchargeAtTokens) return next()
+    throw new SurchargeLineError(
+      `surcharge guard (${rule.provider}/${rule.model}): the request is priced at ${estimated} prompt tokens, `
+      + `at or above the ${rule.surchargeAtTokens}-token surcharge line; blocked before dispatch`,
+    )
+  }, { global: true, prepend: true })
+
+  // A disposed session's ratios cannot be read again; drop them so a long-lived
+  // process does not accumulate one entry per session ever opened.
+  ctx.on('session/disposed', session => {
+    const prefix = `${String(session.id)}\u0000`
+    for (const key of dispatchRatios.keys()) if (key.startsWith(prefix)) dispatchRatios.delete(key)
+  })
 }
 

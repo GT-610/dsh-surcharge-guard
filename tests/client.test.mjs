@@ -136,6 +136,14 @@ test('mounts the registered page with the owner form and writes using its revisi
   assert.equal(toggle().props['aria-checked'], 'false')
 })
 
+test('turns the hard surcharge line on and off', async t => {
+  const ui = await mount(t)
+  // Omitted from the saved config means the safe default: the line is hard.
+  assert.equal(ui.switchFor(en.enforceLine).props['aria-checked'], 'true')
+  await ui.flip(en.enforceLine)
+  assert.deepEqual(ui.form.writes, [mutation('enforceLine', false)])
+})
+
 test('rounded display never saves on focus or blur, and edits only save after commit', async t => {
   const ui = await mount(t)
   const field = () => ui.input(fieldLabel)

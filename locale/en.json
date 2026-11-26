@@ -4,7 +4,7 @@
     "description": "Set a long-context surcharge threshold per provider and model, and try to compact history near that threshold.",
     "detail": "docs/DETAIL.md"
   },
-  "intro": "Set a long-context surcharge threshold per provider and model. The guard estimates pressure and tries to compact history before a request, but cannot guarantee it stays below the line.",
+  "intro": "Set a long-context surcharge threshold per provider and model. The guard estimates pressure, compacts history, and blocks a request at the line; the estimate itself can still undercount.",
   "enabled": "Enable surcharge guard",
   "enabledHint": "Turning this off stops every rule; saved rules are kept.",
   "margin": "Safety margin",
@@ -12,7 +12,7 @@
   "retain": "Retain ratio",
   "retainHint": "Ceiling for recent history kept verbatim, as a fraction of the trigger (0.01–0.9); a large gap folds deeper.",
   "maxAttempts": "Summary attempt limit",
-  "maxAttemptsHint": "Counts attempts that failed or did not lower the pressure; a helpful fold re-arms it. One fold per step, and 0 disables guard compaction.",
+  "maxAttemptsHint": "Counts attempts that failed or did not lower the pressure; a helpful fold re-arms it. One fold per step, and 0 disables the guard and its hard line.",
   "rules": "Rules",
   "rulesEmpty": "No rules yet. Add a model family in bulk below, or add one manually.",
   "colProvider": "Provider",
@@ -61,5 +61,7 @@
   "summaryEffort": "Summary reasoning effort",
   "summaryEffortDefault": "Use the model default",
   "summaryEffortUnknown": "The live catalog lists no reasoning effort for this summary model, so only its default is available.",
-  "summaryProviderNotice": "The selected history and this summary request's prompts and tool definitions are sent to {provider}. The chat model stays the same."
+  "summaryProviderNotice": "The selected history and this summary request's prompts and tool definitions are sent to {provider}. The chat model stays the same.",
+  "enforceLine": "Hard surcharge line",
+  "enforceLineHint": "At the surcharge line, prune tool results and force a deep fold; if the request is still over, block the step instead of sending it."
 }

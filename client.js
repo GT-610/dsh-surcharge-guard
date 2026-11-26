@@ -7,15 +7,17 @@ window.__ModuleLoader__.load({
     const NS = 'dsh-surcharge-guard'
 
     const zh = {
-      "intro": "按服务商和模型设置长上下文加价阈值。插件会在请求前估算用量并尝试压缩历史，但不能保证不越线。",
+      "intro": "按服务商和模型设置长上下文加价阈值。插件会在请求前估算用量并压缩历史；到线时会拦住请求，但估算本身仍可能偏低。",
       "enabled": "启用计费保护",
       "enabledHint": "关闭后所有规则停止生效，已有配置保留。",
+      "enforceLine": "硬红线",
+      "enforceLineHint": "估算已到加价线时，先剪工具结果、再强制深折；仍然压不下去就拦住这一步，不再发出可能双倍计费的请求。",
       "margin": "安全余量",
       "marginHint": "在加价线以下多少 token 触发压缩。余量越大，触发越早。",
       "retain": "保留比例",
       "retainHint": "近期历史的保留上限，按触发线的比例计算（0.01–0.9）；缺口大时会压得更深。",
       "maxAttempts": "摘要次数上限",
-      "maxAttemptsHint": "计的是失败或没有降低压力的尝试；成功压缩后重新计数。每个步骤最多一次，0 表示不发起。",
+      "maxAttemptsHint": "计的是失败或没有降低压力的尝试；成功压缩后重新计数。每个步骤最多一次，0 表示完全关闭保护和红线。",
       "rules": "规则",
       "rulesEmpty": "还没有规则。用下面的按钮按家族批量添加，或手动添加单条。",
       "colProvider": "服务商",
@@ -68,7 +70,9 @@ window.__ModuleLoader__.load({
     }
 
     const en = {
-      "intro": "Set a long-context surcharge threshold per provider and model. The guard estimates pressure and tries to compact history before a request, but cannot guarantee it stays below the line.",
+      "enforceLine": "Hard surcharge line",
+      "enforceLineHint": "At the surcharge line, prune tool results and force a deep fold; if the request is still over, block the step instead of sending it.",
+      "intro": "Set a long-context surcharge threshold per provider and model. The guard estimates pressure, compacts history, and blocks a request at the line; the estimate itself can still undercount.",
       "enabled": "Enable surcharge guard",
       "enabledHint": "Turning this off stops every rule; saved rules are kept.",
       "margin": "Safety margin",
@@ -76,7 +80,7 @@ window.__ModuleLoader__.load({
       "retain": "Retain ratio",
       "retainHint": "Ceiling for recent history kept verbatim, as a fraction of the trigger (0.01–0.9); a large gap folds deeper.",
       "maxAttempts": "Summary attempt limit",
-      "maxAttemptsHint": "Counts attempts that failed or did not lower the pressure; a helpful fold re-arms it. One fold per step, and 0 disables guard compaction.",
+      "maxAttemptsHint": "Counts attempts that failed or did not lower the pressure; a helpful fold re-arms it. One fold per step, and 0 disables the guard and its hard line.",
       "rules": "Rules",
       "rulesEmpty": "No rules yet. Add a model family in bulk below, or add one manually.",
       "colProvider": "Provider",
@@ -533,6 +537,7 @@ window.__ModuleLoader__.load({
       const onCount = rules.filter(entry => entry.enabled !== false).length
       const allOn = rules.length > 0 && onCount === rules.length
       const enabled = snapshot.value?.enabled !== false
+      const enforceLine = snapshot.value?.enforceLine !== false
       const margin = snapshot.value?.safetyMarginTokens ?? 20000
       const retain = snapshot.value?.retainRatio ?? 0.16
       const maxAttempts = snapshot.value?.maxAttempts ?? 2
@@ -631,6 +636,8 @@ window.__ModuleLoader__.load({
         h('div', { style: styles.group },
           h(Row, { label: t('enabled'), hint: t('enabledHint') },
             h(Toggle, { label: t('enabled'), checked: enabled, disabled, onChange: next => write('enabled', next) })),
+          h(Row, { label: t('enforceLine'), hint: t('enforceLineHint') },
+            h(Toggle, { label: t('enforceLine'), checked: enforceLine, disabled, onChange: next => write('enforceLine', next) })),
           scalarRow('margin', 'marginHint', margin, 'safetyMarginTokens'),
           scalarRow('retain', 'retainHint', retain, 'retainRatio', parseRatio, String),
           scalarRow('maxAttempts', 'maxAttemptsHint', maxAttempts, 'maxAttempts', parseTokens, String),
