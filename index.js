@@ -261,9 +261,11 @@ async function enforce(ctx, config, event, messages, attempts, calibrations, dis
   let projected = calibratedPressure(measurement, pendingTokens, ratio)
   if (projected < cap || signal.aborted) return
 
+  // Re-price the current surface without re-learning the ratio: the anchored
+  // usage sample is invariant across a fold or prune, and blending it again
+  // would decay the ratio a second time in the same step.
   const reread = () => {
     measurement = measure()
-    ratio = ratioFor(calibrations, dispatchRatios, session, selection, measurement, header)
     projected = calibratedPressure(measurement, pendingTokens, ratio)
   }
   const budget = budgetFor(attempts, session, turn, selection)
@@ -327,6 +329,9 @@ async function enforce(ctx, config, event, messages, attempts, calibrations, dis
       } catch (error) {
         if (signal.aborted) return
         ctx.logger.warn(`${scope}: ${error instanceof Error ? error.message : String(error)}`)
+        // The transaction may have committed before its cleanup failed; price
+        // the replacement surface instead of the pre-fold estimate.
+        reread()
       }
     }
     if (projected < line || signal.aborted) return
@@ -397,6 +402,8 @@ async function enforce(ctx, config, event, messages, attempts, calibrations, dis
     // A failed summary is one spent attempt, not a reason to stop protecting
     // the turn: the next step may still succeed, and the line still applies.
     warn(error instanceof Error ? error.message : String(error))
+    // A committed fold whose cleanup failed still shrank the surface.
+    reread()
     return enforceLine()
   }
   if (signal.aborted) return

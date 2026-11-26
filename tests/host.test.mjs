@@ -318,6 +318,35 @@ test('a failed summary that spent the budget reports it once per turn', async ()
   assert.equal(probe.calls.compacts.length, 1)
 })
 
+test('a fold that does not lower the pressure does not re-arm the budget', async () => {
+  // The post-fold re-price must use the same ratio: a second blend of the same
+  // anchored observation would decay the ratio, lower the estimate, and make a
+  // no-progress fold look helpful.
+  const probe = fixture({ config: { ...options, maxAttempts: 1 }, total: 1200, shrink: [1200] })
+  await probe.step()
+  await probe.step()
+  assert.equal(probe.calls.compacts.length, 1)
+  assert.match(probe.calls.warnings.join('\n'), /budget exhausted/)
+})
+
+test('a fold whose cleanup failed after landing is re-measured before the line check', async () => {
+  let probe
+  let folds = 0
+  const backend = {
+    compactRegion() {
+      folds += 1
+      // The transaction committed, then disposal failed: the surface really is
+      // smaller, so the stale pre-fold estimate must not block the step.
+      probe.setPressure(400)
+      throw new Error('cleanup failed after commit')
+    },
+  }
+  probe = fixture({ config: { ...options, enforceLine: true, maxAttempts: 1 }, total: 1200, backend })
+  await probe.step()
+  assert.equal(folds, 1, 'the soft fold landed; enforceLine had nothing left to do')
+  assert.match(probe.calls.warnings.join('\n'), /cleanup failed after commit/)
+})
+
 test('the hard line prunes tool results before it spends a forced fold', async () => {
   let setPressure
   const pruner = {

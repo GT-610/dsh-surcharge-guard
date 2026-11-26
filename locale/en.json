@@ -14,7 +14,7 @@
   "retain": "Retain ratio",
   "retainHint": "Ceiling for recent history kept verbatim, as a fraction of the trigger (0.01–0.9); a large gap folds deeper.",
   "maxAttempts": "Summary attempt limit",
-  "maxAttemptsHint": "Counts attempts that failed or did not lower the pressure; a helpful fold re-arms it. One fold per step, and 0 disables the guard and its hard line.",
+  "maxAttemptsHint": "Counts attempts that failed or did not lower the pressure; a helpful fold re-arms it. At most one counted fold per step; hard-line recovery can add one forced fold. 0 disables the guard and its hard line.",
   "rules": "Rules",
   "rulesEmpty": "No rules yet. Add a model family in bulk below, or add one manually.",
   "colProvider": "Provider",
