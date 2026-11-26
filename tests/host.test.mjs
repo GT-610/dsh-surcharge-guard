@@ -16,7 +16,7 @@ const user = tokens => ({ role: 'user', tokens })
 const NODE_TOKENS = 40000
 
 function fixture({ config = options, total = 900, previous, available = true, shrink = [400], error, root = false,
-  backend, isolated, llm, prices = {}, checkpoints = [] } = {}) {
+  backend, isolated, llm, prices = {}, checkpoints = [], measure } = {}) {
   let hook
   let pressure = total
   const calls = { estimates: [], measures: [], compacts: [], warnings: [], logs: [], services: [], next: 0,
@@ -106,7 +106,10 @@ function fixture({ config = options, total = 900, previous, available = true, sh
         calls.measures.push({ owner, header })
         // Node prices match a real long transcript: a fold floor of a couple
         // thousand tokens only makes sense against history this size.
-        return { totalTokens: pressure, nodes: owner.surface.nodes.map(seq => ({ seq, tokens: prices[seq] ?? NODE_TOKENS })) }
+        const nodes = owner.surface.nodes.map(seq => ({ seq, tokens: prices[seq] ?? NODE_TOKENS }))
+        // Tests that exercise provider-usage calibration supply a full
+        // measurement; the rest keep the plain pressure-only shape.
+        return measure === undefined ? { totalTokens: pressure, nodes } : measure({ pressure, nodes })
       },
     },
     logger: { info: text => calls.logs.push(text), warn: text => calls.warnings.push(text) },
@@ -232,6 +235,75 @@ test('failed summary consumes the turn budget; surface growth does not reset it'
   assert.equal(calls.next, 3)
   assert.match(calls.warnings[0], /offline summary failure/)
   assert.match(calls.warnings[1], /budget exhausted/)
+})
+
+test('a fold that lowers the pressure re-arms the attempt budget within the turn', async () => {
+  // One attempt between folds is still the limit; the fold itself restores it,
+  // so a long turn that keeps growing back over the trigger stays protected.
+  const probe = fixture({ config: { ...options, maxAttempts: 1 }, total: 1200, shrink: [400, 400] })
+  await probe.step()
+  assert.equal(probe.calls.compacts.length, 1)
+  await probe.step({ beforeDecision: setPressure => setPressure(1200) })
+  assert.equal(probe.calls.compacts.length, 2)
+  assert.deepEqual(probe.calls.warnings, [])
+})
+
+test('a spent budget still retries above the line once the pressure has grown', async () => {
+  const probe = fixture({ config: { ...options, maxAttempts: 1 }, total: 1200, error: Error('offline summary failure') })
+  await probe.step()
+  // Unchanged pressure is not worth another doomed summary.
+  await probe.step()
+  assert.equal(probe.calls.compacts.length, 1)
+  // A larger request is a different, more expensive one: skipping it pays the
+  // surcharge, so the emergency path spends one more attempt.
+  await probe.step({ beforeDecision: setPressure => setPressure(2500) })
+  assert.equal(probe.calls.compacts.length, 2)
+  assert.match(probe.calls.logs.join('\n'), /above the surcharge line after an unhelpful summary/)
+})
+
+test('prices admitted messages at the ratio observed between usage and the heuristic', async () => {
+  // Trigger 100,000 minus a 20,000 margin is 80,000. The provider counted
+  // 70,000 for a surface the 4-chars heuristic prices at 30,000, so 5,000
+  // admitted heuristic tokens are really about 11,700: 81,667, over the cap.
+  const config = { ...options, rules: [{ ...route, surchargeAtTokens: 100000 }], safetyMarginTokens: 20000, retainRatio: 0.15 }
+  const prices = { 0: 2000, 1: 14000, 2: 14000 }
+  const measured = ({ pressure, nodes }) => ({
+    totalTokens: pressure,
+    surfaceTokens: 30000,
+    surfaceDeltaTokens: 0,
+    baseline: { kind: 'usage', usage: { inputTokens: pressure, outputTokens: 0 } },
+    nodes,
+  })
+  const provider = fixture({ config, prices, total: 70000, shrink: [40000], measure: ({ pressure, nodes }) => measured({ pressure, nodes }) })
+  await provider.step({ claimed: [user(5000)] })
+  assert.equal(provider.calls.compacts.length, 1, 'the calibrated estimate crosses the cap')
+
+  // Without a provider count behind the measurement there is no ratio to learn
+  // from, and the plain heuristic stays in force: 75,000 is under the cap.
+  const estimated = fixture({
+    config, prices, total: 70000,
+    measure: ({ pressure, nodes }) => ({
+      totalTokens: pressure,
+      surfaceTokens: 30000,
+      surfaceDeltaTokens: 0,
+      baseline: { kind: 'estimated', tokens: pressure },
+      nodes,
+    }),
+  })
+  await estimated.step({ claimed: [user(5000)] })
+  assert.equal(estimated.calls.compacts.length, 0)
+})
+
+test('a failed summary that spent the budget reports it once per turn', async () => {
+  const probe = fixture({ config: { ...options, maxAttempts: 1 }, total: 1200, error: Error('offline summary failure') })
+  await probe.step()
+  await probe.step()
+  await probe.step()
+  // The failure is reported once, the exhausted budget once, and the third
+  // step repeats neither.
+  assert.equal(probe.calls.warnings.filter(text => /budget exhausted/.test(text)).length, 1)
+  assert.equal(probe.calls.warnings.filter(text => /offline summary failure/.test(text)).length, 1)
+  assert.equal(probe.calls.compacts.length, 1)
 })
 
 test('no safe range does not spend the turn budget; absent compaction warns and passes through', async () => {

@@ -9,6 +9,8 @@ import assert from 'node:assert/strict'
 
 import {
   normalizeRule, normalizeConfig, ruleFor, balanceCuts, selectRange, retentionBudget, foldFloor,
+  estimateToolsTokens, usageTokens, observedRatio, blendRatio, calibratedPressure, attemptPolicy, emergencyGrowth,
+  CALIBRATION,
 } from '../logic.js'
 
 test('normalizeRule rejects unusable entries', () => {
@@ -255,4 +257,98 @@ test('foldFloor scales with the trigger and never collapses to zero', () => {
   assert.deepEqual(foldFloor(252_000), { summaryTokens: 5040, minReclaimTokens: 2520 })
   assert.deepEqual(foldFloor(4000), { summaryTokens: 1024, minReclaimTokens: 1024 })
   assert.deepEqual(foldFloor(0), { summaryTokens: 1024, minReclaimTokens: 1024 })
+})
+
+// ---- provider/heuristic calibration ----------------------------------------
+
+test('estimateToolsTokens prices a tool schema the way the meter does', () => {
+  assert.equal(estimateToolsTokens(undefined), 0)
+  assert.equal(estimateToolsTokens({}), 0)
+  assert.equal(estimateToolsTokens({ tools: [] }), 0)
+  const tools = [{ name: 'read', description: 'Read a file.' }]
+  const expected = Math.ceil(JSON.stringify(tools).length / 4) + 4
+  assert.equal(estimateToolsTokens({ tools }), expected)
+  // A value that cannot be serialized must not throw out of the guard.
+  const circular = []
+  circular.push(circular)
+  assert.equal(estimateToolsTokens({ tools: circular }), 0)
+})
+
+test('usageTokens sums every provider bucket and refuses an unusable record', () => {
+  assert.equal(usageTokens({ inputTokens: 10, outputTokens: 5 }), 15)
+  assert.equal(usageTokens({ inputTokens: 10, cacheReadTokens: 3, cacheWriteTokens: 2, outputTokens: 5 }), 20)
+  assert.equal(usageTokens({}), 0)
+  assert.equal(usageTokens(undefined), undefined)
+  assert.equal(usageTokens('usage'), undefined)
+})
+
+test('observedRatio compares the provider count with the heuristic of the same envelope', () => {
+  const header = { tools: [{ name: 't' }] }
+  const tools = estimateToolsTokens(header)
+  // surfaceTokens - surfaceDeltaTokens is the heuristic price of the committed
+  // history the provider count covers.
+  const measurement = {
+    totalTokens: 90_000,
+    surfaceTokens: 40_000,
+    surfaceDeltaTokens: 10_000,
+    baseline: { kind: 'usage', usage: { inputTokens: 80_000, outputTokens: 10_000 } },
+  }
+  assert.equal(observedRatio(measurement, header), 90_000 / (tools + 30_000))
+  // An estimate has no provider count behind it to learn from.
+  assert.equal(observedRatio({ ...measurement, baseline: { kind: 'estimated', tokens: 90_000 } }, header), undefined)
+  // Usage without the surface fields cannot reconstruct the anchor.
+  assert.equal(observedRatio({ totalTokens: 1, baseline: measurement.baseline }, header), undefined)
+  assert.equal(observedRatio({ ...measurement, baseline: { kind: 'usage', usage: {} } }, header), undefined)
+})
+
+test('blendRatio applies an undercount at once and releases one slowly', () => {
+  assert.equal(blendRatio(undefined, undefined), 1)
+  assert.equal(blendRatio(1, 2.5), 2.5, 'a larger observation applies immediately')
+  assert.equal(blendRatio(2, 1), 1.9, 'a smaller one moves only 10% of the way')
+  // Neither direction leaves the bounds.
+  assert.equal(blendRatio(1, 0.2), 1)
+  assert.equal(blendRatio(CALIBRATION.max, 100), CALIBRATION.max)
+  assert.equal(blendRatio(2, Number.NaN), 2)
+})
+
+test('calibratedPressure scales only the heuristic-priced part', () => {
+  const usageBacked = {
+    totalTokens: 70_000,
+    surfaceTokens: 30_000,
+    surfaceDeltaTokens: 5_000,
+    baseline: { kind: 'usage', usage: { inputTokens: 65_000, outputTokens: 5_000 } },
+  }
+  // 65,000 provider tokens plus the scaled delta and admitted messages.
+  assert.equal(calibratedPressure(usageBacked, 1_000, 2), 65_000 + 12_000)
+  // A wholly heuristic estimate is scaled as a whole.
+  const estimated = {
+    totalTokens: 70_000,
+    surfaceTokens: 70_000,
+    surfaceDeltaTokens: 0,
+    baseline: { kind: 'estimated', tokens: 70_000 },
+  }
+  assert.equal(calibratedPressure(estimated, 1_000, 2), 142_000)
+  // Without a calibration the behaviour is the old total plus pending.
+  assert.equal(calibratedPressure({ totalTokens: 1200 }, 300, 1), 1500)
+  // A ratio below one is never applied: the heuristic is the floor.
+  assert.equal(calibratedPressure(usageBacked, 1_000, 0.5), 65_000 + 6_000)
+})
+
+test('attemptPolicy re-arms only through a fold, and retries above the line on growth', () => {
+  const base = { maxAttempts: 1, line: 272_000, emergencyGrowth: 1024 }
+  assert.equal(attemptPolicy({ ...base, attempts: 0, projected: 260_000 }), 'attempt')
+  // Spent and under the line: no retry, no alarm.
+  assert.equal(attemptPolicy({ ...base, attempts: 1, projected: 260_000 }), 'exhausted')
+  // Spent at the line with no growth since the last attempt: do not loop.
+  assert.equal(attemptPolicy({ ...base, attempts: 1, projected: 272_000, lastAttemptTokens: 272_000 }), 'exhausted')
+  // Spent above the line after growth: one more attempt is cheaper than paying.
+  assert.equal(attemptPolicy({ ...base, attempts: 1, projected: 300_000, lastAttemptTokens: 272_000 }), 'emergency')
+  // No previous attempt on record still counts as growth to protect against.
+  assert.equal(attemptPolicy({ ...base, attempts: 1, projected: 272_000 }), 'emergency')
+})
+
+test('emergencyGrowth scales with the trigger but keeps a visible floor', () => {
+  assert.equal(emergencyGrowth(252_000), 2520)
+  assert.equal(emergencyGrowth(900), 1024)
+  assert.equal(emergencyGrowth(0), 1024)
 })

@@ -1,6 +1,9 @@
 /** Host-side, best-effort surcharge protection for model requests. */
 import z from '@deepseek-ai/schemastery'
-import { DEFAULTS, foldFloor, normalizeConfig, retentionBudget, ruleFor, selectRange } from './logic.js'
+import {
+  DEFAULTS, attemptPolicy, blendRatio, calibratedPressure, emergencyGrowth,
+  foldFloor, normalizeConfig, observedRatio, retentionBudget, ruleFor, selectRange,
+} from './logic.js'
 
 function compactionFor(ctx, agent) {
   // Web presets own an isolated backend; a standalone profile may own it at root.
@@ -152,7 +155,45 @@ function projectedHeader(session, selection) {
   }
 }
 
-async function enforce(ctx, config, { agent, signal, modelSelection }, messages, budget, generation) {
+/** Attempt state for one turn of one session, route included. */
+function budgetFor(attempts, session, turn, selection) {
+  let budget = attempts.get(session)
+  if (budget === undefined || budget.turn !== turn
+    || budget.provider !== selection.provider || budget.model !== selection.model) {
+    budget = {
+      turn,
+      provider: selection.provider,
+      model: selection.model,
+      attempts: 0,
+      lastAttemptTokens: undefined,
+      reported: new Set(),
+    }
+    attempts.set(session, budget)
+  }
+  return budget
+}
+
+/**
+ * Calibration ratio for one session and route.
+ *
+ * Kept per route so switching models mid-session does not carry one
+ * tokenizer's expansion factor onto another, and per session so a long-lived
+ * conversation does not leak its ratio into a fresh one.
+ */
+function ratioFor(calibrations, session, selection, measurement, header) {
+  let routes = calibrations.get(session)
+  if (routes === undefined) {
+    routes = new Map()
+    calibrations.set(session, routes)
+  }
+  const key = `${selection.provider}\u0000${selection.model}`
+  const ratio = blendRatio(routes.get(key), observedRatio(measurement, header))
+  routes.set(key, ratio)
+  return ratio
+}
+
+async function enforce(ctx, config, event, messages, attempts, calibrations, generation) {
+  const { agent, signal, modelSelection, turn } = event
   const selection = modelSelection ?? agent.model?.current()
   if (selection === undefined) return
   const rule = ruleFor(config, selection)
@@ -178,16 +219,40 @@ async function enforce(ctx, config, { agent, signal, modelSelection }, messages,
   }
   const measure = () => meter.measure(session, header)
   let measurement = measure()
-  let projected = measurement.totalTokens + pendingTokens
+  // The provider's own count for the committed history plus a heuristic delta
+  // is not the size of the next request. Price the delta and the admitted
+  // messages at the route's observed expansion factor, or a fixed 4-chars
+  // denominator quietly spends the whole safety margin.
+  let ratio = ratioFor(calibrations, session, selection, measurement, header)
+  let projected = calibratedPressure(measurement, pendingTokens, ratio)
   if (projected < cap || signal.aborted) return
 
+  const budget = budgetFor(attempts, session, turn, selection)
   const warn = reason => ctx.logger.warn(
     `${scope}: ${reason}; continuing with an estimated ${projected} prompt tokens `
     + `(trigger ${cap}, surcharge line ${line})`,
   )
-  if (budget.used >= config.maxAttempts) {
-    if (projected >= line) warn('summary budget exhausted, surcharge possible')
+  // One report per reason between attempts: a state that persists across the
+  // steps of a turn should not write the same line at every one of them.
+  const warnOnce = (key, reason) => {
+    if (budget.reported.has(key)) return
+    budget.reported.add(key)
+    warn(reason)
+  }
+  const policy = attemptPolicy({
+    attempts: budget.attempts,
+    maxAttempts: config.maxAttempts,
+    projected,
+    line,
+    lastAttemptTokens: budget.lastAttemptTokens,
+    emergencyGrowth: emergencyGrowth(cap),
+  })
+  if (policy === 'exhausted') {
+    if (projected >= line) warnOnce('exhausted', 'summary budget exhausted, surcharge possible')
     return
+  }
+  if (policy === 'emergency') {
+    ctx.logger.info(`${scope}: above the surcharge line after an unhelpful summary; trying once more`)
   }
   const compaction = compactionFor(ctx, agent)
   if (compaction === undefined) {
@@ -226,25 +291,39 @@ async function enforce(ctx, config, { agent, signal, modelSelection }, messages,
     // A refusal costs no attempt, so a phantom pressure would otherwise repeat
     // this line on every step of the turn. The surface it judged is unchanged
     // between them, so one report per turn is enough; the next turn re-checks.
-    if (budget.refused !== true) {
-      budget.refused = true
-      warn('no safe history range worth folding')
-    }
+    warnOnce('refused', 'no safe history range worth folding')
     return
   }
   const before = projected
-  budget.used += 1
-  const result = rule.summaryTarget === undefined
-    ? await compaction.compactRegion(range.start, range.end, agent, signal)
-    : await compactWithSummaryTarget(ctx, compaction, rule, range, agent, signal, bound)
+  budget.attempts += 1
+  budget.lastAttemptTokens = projected
+  budget.reported.clear()
+  let result
+  try {
+    result = rule.summaryTarget === undefined
+      ? await compaction.compactRegion(range.start, range.end, agent, signal)
+      : await compactWithSummaryTarget(ctx, compaction, rule, range, agent, signal, bound)
+  } catch (error) {
+    if (signal.aborted) return
+    // A failed summary is one spent attempt, not a reason to stop protecting
+    // the turn: the next step may still succeed, and the emergency path above
+    // the surcharge line retries even when the budget is gone.
+    warn(error instanceof Error ? error.message : String(error))
+    return
+  }
   if (signal.aborted) return
   measurement = measure()
-  projected = measurement.totalTokens + pendingTokens
+  ratio = ratioFor(calibrations, session, selection, measurement, header)
+  projected = calibratedPressure(measurement, pendingTokens, ratio)
   ctx.logger.info(`${scope}: folded ${result.shadowedSeqs.length} nodes; estimated ${before} → ${projected} prompt tokens`)
   if (projected >= before) {
     warn('compaction did not lower the estimated pressure')
     return
   }
+  // A fold that helped re-arms the budget: protection that is working must not
+  // be what disables protection for the rest of a long turn.
+  budget.attempts = 0
+  budget.lastAttemptTokens = undefined
   if (projected >= cap) {
     warn(projected >= line ? 'still at or above the surcharge line' : 'still within the safety margin')
   }
@@ -268,13 +347,17 @@ export const Config = z.object({
   })).default([]).volatile(),
   safetyMarginTokens: z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER).default(DEFAULTS.safetyMarginTokens).volatile(),
   retainRatio: z.number().min(0.01).max(0.9).default(DEFAULTS.retainRatio).volatile(),
+  /** Unhelpful attempts allowed between folds; a helpful fold re-arms it. */
   maxAttempts: z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER).default(DEFAULTS.maxAttempts).volatile(),
 })
 
 export const inject = ['tokenMeter']
 
 export function apply(ctx, rawConfig) {
+  // Per-session attempt state and per-route token calibration; both are keyed
+  // weakly so a finished session is collected with its guard state.
   const attempts = new WeakMap()
+  const calibrations = new WeakMap()
 
   ctx.on('agent/pre-step', async (event, next) => {
     // Let native compaction and other downstream middleware run first, then
@@ -282,17 +365,12 @@ export function apply(ctx, rawConfig) {
     // Their surface replacement is recorded so this step is not compacted twice.
     const generation = event.agent.session.surface?.replaceGeneration
     const decision = await next()
-    const { agent, signal, turn } = event
+    const { signal } = event
     if (decision.kind !== 'enter' || signal.aborted) return decision
     try {
       const config = normalizeConfig(rawConfig)
       if (!config.enabled || config.rules.length === 0 || config.maxAttempts === 0) return decision
-      let budget = attempts.get(agent.session)
-      if (budget === undefined || budget.turn !== turn) {
-        budget = { turn, used: 0, refused: false }
-        attempts.set(agent.session, budget)
-      }
-      await enforce(ctx, config, event, decision.messages, budget, generation)
+      await enforce(ctx, config, event, decision.messages, attempts, calibrations, generation)
     } catch (error) {
       if (!signal.aborted) {
         ctx.logger.warn(`surcharge guard: ${error instanceof Error ? error.message : String(error)}; continuing the step`)
